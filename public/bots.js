@@ -27,6 +27,7 @@ window.initEchoBots=({$,el,clear,cloudApi,api,cloudContext,runAction,prepareActi
    for(const step of j.steps||[]){card.append(el('p','sub small',`${step.name||step.id||'Specialist'} · ${step.status}`));if(step.result?.summary&&step.result.summary!==j.result?.summary)copy(step.result.summary);}
    const text=result?.reply||result?.summary||j.draft;copy(text);if(j.error)card.append(el('p','sub small',j.error));if(result?.question)card.append(el('p','bot-copy',`Needs you: ${result.question}`));
    for(const artifact of result?.artifacts||[]){if(shown.has(artifact.value))continue;card.append(el('h3','',artifact.label||artifact.kind));copy(artifact.value);}
+   if(result?.quality?.verdict||result?.quality?.issues?.length)card.append(el('p','sub small',`Quality check · ${result.quality.verdict||'no verdict'}${result.quality.revised?' · revised once':''}${result.quality.issues?.length?` · open: ${result.quality.issues.join(' ')}`:''}`));
    if(result?.verificationRefs?.length)card.append(el('p','sub small',`Evidence: ${result.verificationRefs.join(' · ')}`));
    for(const blocker of result?.blockers||[])card.append(el('p','bot-copy',`Needs attention: ${blocker}`));
    for(const source of result?.sources||[]){try{const url=new URL(source.url);if(url.protocol!=='https:')continue;const a=el('a','sub small',source.title||url.hostname);a.href=url.href;a.target='_blank';a.rel='noopener noreferrer';card.append(a);}catch{}}

@@ -288,10 +288,12 @@ test('checkpoint persistence is awaited before the next effect and failed persis
  release();await failure;assert.equal(reads,0);
 });
 
+// A Plan reply that meets the plan quality gate, so the round count measures replay only.
+const RESUMED_PLAN='Resumed real Today results. Step 2 depends on step 1; done when both are complete.';
 test('real relay retries use only owner-scoped trusted checkpoints and never expose provider context to callers',async t=>{
  let fail=true,round=0;const gemini={model:'fixture',generate:async body=>{
   round++;if(fail&&body.contents.some(c=>c.parts.some(p=>p.functionResponse)))throw Error('Offline fixture');
-  return {candidates:[{content:{role:'model',parts:body.contents.some(c=>c.parts.some(p=>p.functionResponse))?[{text:'Resumed real Today results'}]:[{functionCall:{name:'get_today',args:{}}}]}}]};
+  return {candidates:[{content:{role:'model',parts:body.contents.some(c=>c.parts.some(p=>p.functionResponse))?[{text:RESUMED_PLAN}]:[{functionCall:{name:'get_today',args:{}}}]}}]};
  }};
  const relay=createRelay({secret:'retry-private-test-secret-'.repeat(3),gemini}),server=http.createServer(relay.handler);await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>{server.closeAllConnections();server.close();});
  const base=`http://127.0.0.1:${server.address().port}`,owner='c'.repeat(32),other='d'.repeat(32);
@@ -305,7 +307,7 @@ test('real relay retries use only owner-scoped trusted checkpoints and never exp
  assert.equal((await api(passes[1],command)).status,400);
  fail=false;const accepted=await api(passes[0],command);assert.equal(accepted.status,200);assert.ok(accepted.body.newRunId);assert.match(accepted.body.message,/saved/);
  await until(async()=>(await api(passes[0])).body.jobs[0]?.status==='done');
- const jobs=(await api(passes[0])).body.jobs;assert.equal(jobs[0].result.reply,'Resumed real Today results');assert.equal(jobs[1].status,'failed');
+ const jobs=(await api(passes[0])).body.jobs;assert.equal(jobs[0].result.reply,RESUMED_PLAN);assert.equal(jobs[1].status,'failed');
  assert.equal((await api(passes[1])).body.jobs.length,0);assert.equal((await api(passes[0],command)).body.newRunId,accepted.body.newRunId);assert.equal(round,3);
 });
 
