@@ -30,7 +30,18 @@
   const hint=node('p','office-muted'),actions=node('div','office-action-buttons'),send=node('button','office-button office-primary','Send update'),retry=node('button','office-button office-primary','Retry'),revise=node('button','office-button','Interrupt & revise'),stop=node('button','office-button office-danger','Stop agent'),follow=node('button','office-button','Follow up'),stopTeam=node('button','office-button office-danger','Stop team'),feedback=node('p','office-feedback');feedback.setAttribute('role','status');retry.title='Continue this failed agent from saved progress';
   const agentMenu=node('details','office-menu office-agent-menu'),agentSummary=node('summary'),agentItems=node('div','office-menu-items');agentSummary.setAttribute('aria-label','Agent options');agentSummary.append(moreIcon());agentItems.append(stop,stopTeam);agentMenu.append(agentSummary,agentItems);inspectorHeader.append(agentMenu);
   inspectorHeader.append(close);inspector.id=(root.id||'agent-office')+'-inspector';inspector.setAttribute('aria-label','Selected agent inspector');
-  send.type='submit';for(const b of [retry,revise,stop,follow,stopTeam])b.type='button';actions.append(send,retry,revise,follow);form.append(updateLabel,input,actions,hint,feedback);inspector.append(inspectorHeader,scope,goal,activity,output,form);layout.append(stage,inspector);
+  send.type='submit';for(const b of [retry,revise,stop,follow,stopTeam])b.type='button';actions.append(send,retry,revise,follow);form.append(updateLabel,input,actions,hint,feedback);// The inspector shows a short preview; the full result opens in a copyable panel.
+  let resultText='',resultRendered=null;
+  const resultDialog=node('dialog','office-dialog office-result-dialog'),resultHeader=node('div','office-dialog-heading'),resultTitle=node('h2','','Full result'),resultActions=node('div','office-result-actions'),resultCopy=node('button','office-button','Copy'),resultClose=node('button','office-button','Close'),resultBody=node('div','office-result-body'),resultStatus=node('p','office-muted office-result-status',''),expand=node('button','office-button office-output-open','Open full result');
+  resultDialog.setAttribute('aria-label','Full agent result');resultDialog.append(resultHeader,resultBody,resultStatus);resultHeader.append(resultTitle,resultActions);resultActions.append(resultCopy,resultClose);
+  expand.type=resultCopy.type=resultClose.type='button';expand.hidden=true;output.title='Open full result';
+  for(const b of [expand,resultCopy,resultClose])b.classList.add(...(phone?['glass','pill']:['secondary-button']));
+  root.parentElement.append(resultDialog);
+  function renderResult(){resultRendered=resultText;resultBody.replaceChildren(window.EchoMarkdown?window.EchoMarkdown.render(resultText):node('p','',resultText));}
+  function openResult(){if(!resultText)return;const current=agent();resultTitle.textContent=current?`${displayName(current)} · Full result`:'Full result';resultStatus.textContent='';renderResult();if(!resultDialog.open)resultDialog.showModal();resultClose.focus();}
+  async function copyResult(){try{await navigator.clipboard.writeText(resultText);resultStatus.textContent='Copied.';}catch{const area=node('textarea','');area.value=resultText;area.setAttribute('readonly','');area.style.cssText='position:fixed;opacity:0;pointer-events:none';document.body.append(area);area.select();let copied=false;try{copied=document.execCommand('copy');}catch{}area.remove();resultStatus.textContent=copied?'Copied.':'Couldn’t copy. Select the text and copy it.';}}
+  output.addEventListener('click',openResult);expand.onclick=openResult;resultCopy.onclick=copyResult;resultClose.onclick=()=>resultDialog.close();
+  inspector.append(inspectorHeader,scope,goal,activity,output,expand,form);layout.append(stage,inspector);
   root.append(heading,layout);
   // Use the host app's actual control and glass classes, not a second theme.
   for(const el of [controls,inspector,workspaceItems,agentItems,echoTile,cameraControls])el.classList.add(phone?'glass':'office-native-glass');
@@ -74,6 +85,7 @@
    const result=a?.result||(selected==='lead'?j?.result:null);const summary=[result?.question,result?.reply||result?.summary,['failed','interrupted'].includes(a?.status)?a?.error:'',['failed','stopped','interrupted','cancelled'].includes(a?.status)?a?.draft:''].filter(Boolean).filter((v,i,all)=>all.indexOf(v)===i).join('\n\n');
    const modelNotice=result?.modelInfo?.fallback?`${result.modelInfo.requested} was unavailable · answered with ${result.modelInfo.used}`:'';
    const outputKey=JSON.stringify([summary,modelNotice]);
+   resultText=summary;expand.hidden=!summary;if(!summary&&resultDialog.open)resultDialog.close();else if(resultDialog.open&&resultRendered!==summary)renderResult();
    if(output.dataset.text!==outputKey){output.replaceChildren();if(summary)output.append(window.EchoMarkdown?window.EchoMarkdown.render(summary):node('p','',summary));if(modelNotice){const notice=node('p','office-muted',modelNotice);notice.dataset.modelNotice='true';output.append(notice);}output.dataset.text=outputKey;}
    const present=!!j&&(j.steps?.length?j.steps.some(s=>s.id===selected):j.botId===selected),controllable=present&&live()&&active(a?.status);
    const retryable=present&&['failed','interrupted'].includes(a?.status);retry.hidden=!retryable;retry.disabled=busy||!connected||data.jobs.some(other=>other.id!==j?.id&&other.live!==false&&['running','queued'].includes(other.status));
