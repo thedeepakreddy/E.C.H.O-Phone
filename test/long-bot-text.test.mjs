@@ -9,11 +9,11 @@ const bot={id:'research',mode:'research',role:'Research',runId:'fixture'};
 const cloudWith=generate=>createCloud({store:createStore({key:Buffer.alloc(32)}),tools:{},gemini:{model:'fixture',generate}});
 const answer=(text,finishReason='STOP')=>({candidates:[{finishReason,content:{role:'model',parts:[{text}]}}]});
 
-test('bots get a large output budget; ordinary chat stays short',async()=>{
+test('bots set no output cap of ours; ordinary chat stays short',async()=>{
  const budgets=[];
  const cloud=cloudWith(async body=>{budgets.push(body.generationConfig.maxOutputTokens);return answer('Done.');});
  await cloud.chat({text:'Write the report',bot});await cloud.chat({text:'Hello'});
- assert.ok(budgets[0]>=8192,`bot budget was ${budgets[0]}`);assert.equal(budgets[1],1200);
+ assert.equal(budgets[0],undefined,'a bot is limited only by the model');assert.equal(budgets[1],1200);
 });
 
 test('a bot reply cut off at the length limit is continued and joined, not saved half-written',async()=>{
