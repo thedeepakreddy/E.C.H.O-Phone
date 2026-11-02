@@ -9,7 +9,8 @@ test('Phone specialists share Echo chat’s configured brain/model, not a role-s
   const cloud=createCloud({gemini,store:createStore({key:Buffer.alloc(32)}),tools:{}});
   await cloud.chat({text:'Ordinary Echo chat'});
   for(const id of ['research','plan','write','review','analyse','echo-assistant'])await cloud.chat({text:'Specialist task',bot:{id,name:id,role:'Fixture role',mode:'research',model:'claude-must-not-override',runId:randomUUID()}});
-  assert.equal(requests.length,7);assert.ok(requests.every(r=>r.model===model),'Normal chat and every specialist use the same configured model');
+  // Write and Analyse each add one independent-verifier request on the same model.
+  assert.equal(requests.length,9);assert.ok(requests.every(r=>r.model===model),'Normal chat and every specialist use the same configured model');
  }
 });
 test('office telemetry follows real source reads, streaming text and tool completion, and ignores late events after stop',async()=>{

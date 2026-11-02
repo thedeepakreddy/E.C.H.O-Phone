@@ -1,3 +1,4 @@
+import {isVerify,verifyReply} from './verify-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
@@ -7,7 +8,7 @@ import {createStore} from '../lib/store.js';
 
 // Write has no sourcing gate, so these tests isolate length handling.
 const bot={id:'write',name:'Write',mode:'write',role:'Write',runId:'fixture'};
-const cloudWith=generate=>createCloud({store:createStore({key:Buffer.alloc(32)}),tools:{},gemini:{model:'fixture',generate}});
+const cloudWith=generate=>createCloud({store:createStore({key:Buffer.alloc(32)}),tools:{},gemini:{model:'fixture',generate:async(body,o)=>isVerify(body)?verifyReply():generate(body,o)}});
 const answer=(text,finishReason='STOP')=>({candidates:[{finishReason,content:{role:'model',parts:[{text}]}}]});
 
 test('bots set no output cap of ours; ordinary chat stays short',async()=>{

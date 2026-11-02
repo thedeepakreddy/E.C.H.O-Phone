@@ -42,8 +42,9 @@ test('ordinary Phone chat and all six Office specialists use the upgraded defaul
  await cloud.chat({text:'Hello'});
  for(const id of ['research','plan','write','review','analyse','echo-assistant'])
   await cloud.chat({text:'Complete fixture task',bot:{id,name:id,role:'Fixture role',mode:'research',runId:`fixture-${id}`,model:'must-not-override'}});
- assert.equal(requests.length,7);
+ // Write and Analyse each add one independent-verifier request (medium reasoning).
+ assert.equal(requests.length,9);
  assert.ok(requests.every(r=>r.url.endsWith('/models/gemini-3.8-flash:generateContent')));
  // Chat stays responsive; specialists reason at the level their job needs.
- assert.deepEqual(requests.map(r=>r.body.generationConfig.thinkingConfig.thinkingLevel),['low','high','high','medium','high','high','medium']);
+ assert.deepEqual(requests.map(r=>r.body.generationConfig.thinkingConfig.thinkingLevel),['low','high','high','medium','medium','high','high','medium','medium']);
 });

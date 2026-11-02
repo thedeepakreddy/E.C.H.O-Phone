@@ -82,10 +82,23 @@ The Phone suite exercises: distinct methods and reasoning levels for all six age
 - **Mac reasoning and routing.** Built-in agents now follow the brain the user selected instead of forcing Review, Analyse and Lead onto Claude (which failed when Claude was not set up). Each role's reasoning level is passed as `limits.reasoning` and mapped per provider: Gemini 3 `thinkingLevel`, Gemini 2.5 `thinkingBudget`, Claude `maxThinkingTokens`, NVIDIA `reasoningEffort` raised to high for high-reasoning roles. Ollama and models without a thinking setting keep their defaults. Custom agents keep the tier the user chose. Tests: Mac `fleettest` (25/25) and `agentintelligencetest` (30/30).
 - **Results after the follow-up:** Phone `npm test` 277/277. Mac typecheck clean; the fleet, bots, swarm and agent suites pass.
 
+## Follow-up: meaning checks and Mac source ledger
+
+- **Word check (Phone and Mac).** `claimSupportIssues` flags a cited sentence whose content words barely appear on the page it cites (under 35% overlap). It is blocking and costs no model call.
+- **Independent verifier (Phone).** After the rules pass, one extra model call (`verificationRequest`, medium reasoning) judges the deliverable. It runs for Write and Analyse results and for any result that cites a page read this run; Review and ordinary chat are never verified. The verifier sees the user's request, the deliverable and, for each cited claim, the best-matching passage of that page (marked untrusted data). It returns:
+  - each claim as SUPPORTED, PARTIAL or UNSUPPORTED;
+  - argument problems as major or minor;
+  - for Write, whether the tone fits the request.
+
+  Blocking: UNSUPPORTED claims, major argument problems, and a Write tone mismatch. PARTIAL claims and minor problems are recorded. If the call fails, the result is returned with a recorded note (fails open). The page texts come from the saved tool results, so this survives a resume.
+- **Mac source ledger.** `read_browser_page` now records each page a bot task reads (`src/frontier/source-ledger.ts`, at most 12 pages of 60,000 characters per task). The completion gate checks cited figures and claim wording against those pages, then clears the ledger.
+- **Mac independent Review step.** A single Research, Analyse, Write or Plan run on Mac gets a read-only Review task that depends on it. The reviewer re-reads the cited sources and judges meaning, argument and tone. Its report is attached as "Independent review", and a non-passing verdict appears under "Needs attention". Team runs (which already have Review and Lead) and Review runs are not given one. `createMacBots(..., {verify:false})` turns it off.
+- **Mac status vs verdict.** A Result submitted as `completed` whose own verdict is FAIL, PARTIAL PASS or BLOCKED is not accepted as complete.
+- **Results:** Phone `npm test` 281/281. Mac `botverifytest` 15/15; `npm test` 115/120, with the same five environment-only failures as before.
+
 ## 18–20. Known limitations and next steps
 
-- **No live-model evaluation.** All tests use scripted models. Whether answers are better in practice still has to be measured on the real providers.
-- **FineWeb.** Neither repository records the earlier investigation or its errors; the synthetic test checks the same failure mode. Save the real sources, questions and known errors as a fixture to add it.
-- **Gate scope.** The cited-figure check compares numbers, not meaning: it cannot tell whether a cited page supports a non-numeric claim. Writing checks catch stock phrasing, placeholders and repetition, not tone or argument quality. Both remain Review's job beyond that.
-- **Mac cited figures.** Mac's gate sees the submitted Result, not the pages the agent read, so the cited-figure check does not run there yet; it needs the page-reading tool to record figures for the task.
-- **Consult cost.** Each consult is a full specialist run and counts toward Phone's daily message cap and the 8-minute run budget.
+- **No live-model evaluation.** All tests use scripted models. How well the verifier and the reviewer judge real deliverables has to be measured on the real providers.
+- **Cost and time.** On Phone, verification adds one model call to Write, Analyse and cited results. On Mac, single runs now take two agents (the specialist, then Review).
+- **The verifier is a model.** It can miss problems or over-flag them; that is why only clear failures block and everything else is recorded, and why the revision is bounded to one.
+- **FineWeb.** Neither repository records the earlier investigation or its errors; the synthetic test checks the same failure mode.
