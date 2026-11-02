@@ -1,3 +1,4 @@
+import {isVerify,verifyReply} from './verify-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createCloud} from '../lib/cloud.js';
@@ -7,8 +8,8 @@ import {PLAYBOOKS,botInstructions,playbookFor,qualityIssues,parseVerdict} from '
 // Scripted model: each call returns the next scripted turn and records the request.
 function scripted(turns){
  const requests=[];let i=0;
- const gemini={model:'fixture',generate:async(body,options)=>{requests.push({body:structuredClone(body),thinking:options?.thinking});const t=turns[Math.min(i++,turns.length-1)];return {candidates:[{finishReason:'STOP',content:{role:'model',parts:typeof t==='string'?[{text:t}]:t}}]};}};
- return {gemini,requests};
+ const verifies=[];const gemini={model:'fixture',verifies,generate:async(body,options)=>{if(isVerify(body)){verifies.push(structuredClone(body));return verifyReply(gemini.verdicts?.shift());}requests.push({body:structuredClone(body),thinking:options?.thinking});const t=turns[Math.min(i++,turns.length-1)];return {candidates:[{finishReason:'STOP',content:{role:'model',parts:typeof t==='string'?[{text:t}]:t}}]};}};
+ return {gemini,requests,verifies};
 }
 const cloudFor=(gemini,tools={})=>createCloud({gemini,store:createStore({key:Buffer.alloc(32)}),tools});
 const agent=id=>({id,name:id,role:'Built-in role',mode:id==='echo-assistant'?'assist':id==='write'||id==='plan'?id:'research',runId:`eval-${id}`});
@@ -117,6 +118,7 @@ const agentOf=body=>/working as the user's Echo agent "([^"]+)"/.exec(body.syste
 function team(script){
  const calls=[];const counters={};
  const gemini={model:'fixture',generate:async body=>{
+  if(isVerify(body))return verifyReply();
   const who=agentOf(body),n=counters[who]=(counters[who]??0)+1;calls.push({who,tools:body.tools[0].functionDeclarations.map(d=>d.name),last:JSON.stringify(body.contents.at(-1))});
   const t=script(who,n,body);return {candidates:[{finishReason:'STOP',content:{role:'model',parts:typeof t==='string'?[{text:t}]:t}}]};
  }};
@@ -164,4 +166,45 @@ test('stock AI phrasing in a Write deliverable earns one revision; Assist only r
  assert.equal(s.requests.length,1);assert.ok(r.quality.issues.some(i=>/Generic AI phrasing/.test(i)));
  s=scripted(['Dear [Recipient Name], thanks.\nVerdict: PASS WITH MINOR ISSUES']);r=await cloudFor(s.gemini).chat({text:'Email',bot:agent('write')});
  assert.equal(s.requests.length,1);assert.ok(r.quality.issues.some(i=>/placeholders/.test(i)));
+});
+
+// ---- Meaning: independent verification of cited claims, argument and tone ----
+const PAGE='<html><head><title>Corpus report</title></head><body><p>Intro text.</p><p>'+'Background material about crawling. '.repeat(80)+'</p><p>The filtered corpus was deduplicated with MinHash using 5-grams across all crawl snapshots.</p></body></html>';
+const pageTools={pageFetch:async()=>({status:200,headers:{'content-type':'text/html'},body:Buffer.from(PAGE)})};
+const readPage=[{functionCall:{name:'read_web_page',args:{url:'https://corpus.example/report'}}}];
+
+test('a cited claim the verifier finds unsupported is revised; the verifier reads the matching passage as untrusted data',async()=>{
+ const s=scripted([readPage,'Deduplication used exact URL matching only, per the report (https://corpus.example/report).\nVerdict: PASS','Deduplication used MinHash with 5-grams across snapshots (VERIFIED, https://corpus.example/report).\nVerdict: PASS']);
+ s.gemini.verdicts=[{claims:[{claim:'Deduplication used exact URL matching only',status:'UNSUPPORTED',reason:'the passage says MinHash'}],argument:[]},{claims:[{claim:'MinHash with 5-grams',status:'SUPPORTED'}],argument:[]}];
+ const r=await cloudFor(s.gemini,pageTools).chat({text:'How was the corpus deduplicated?',bot:agent('research')});
+ assert.equal(s.verifies.length,2,'verified before and after the revision');
+ const asked=s.verifies[0].contents[0].parts[0].text;assert.match(asked,/MinHash using 5-grams/,'the passage that matches the claim is sent');assert.doesNotMatch(asked,/Intro text/);
+ assert.match(s.verifies[0].systemInstruction.parts[0].text,/untrusted data/);
+ assert.match(lastUser(s.requests[2]),/does not support "Deduplication used exact URL matching only"/);
+ assert.match(r.reply,/MinHash/);assert.deepEqual(r.quality.issues,[]);assert.equal(r.quality.verified,true);
+});
+
+test('citing a read page for an unrelated claim is caught by the word check without a model call',async()=>{
+ const s=scripted([readPage,'Quarterly revenue grew strongly across European subscription markets (https://corpus.example/report).\nVerdict: PASS','The corpus was deduplicated with MinHash using 5-grams (https://corpus.example/report).\nVerdict: PASS']);
+ const r=await cloudFor(s.gemini,pageTools).chat({text:'Summarise the report',bot:agent('research')});
+ assert.match(lastUser(s.requests[2]),/shares little with the page it cites/);assert.equal(s.verifies.length,1,'verifier runs only on the revised, rule-clean deliverable');assert.match(r.reply,/MinHash/);
+});
+
+test('Write: a tone mismatch is revised; a major argument flaw blocks, a minor one is only recorded',async()=>{
+ let s=scripted(['yo recruiter!! hire me lol\nVerdict: PASS','Dear Ms Patel, I am applying for the analyst role.\nVerdict: PASS']);
+ s.gemini.verdicts=[{claims:[],argument:[],tone:{fits:false,problem:'too casual for a recruiter email'}},{claims:[],argument:[{problem:'Could mention one achievement.',severity:'minor'}],tone:{fits:true}}];
+ let r=await cloudFor(s.gemini).chat({text:'Write a formal email to a recruiter',bot:agent('write')});
+ assert.equal(s.requests.length,2);assert.match(lastUser(s.requests[1]),/tone does not fit the request: too casual/);
+ assert.ok(r.quality.issues.some(i=>/minor argument issue/.test(i)));
+ s=scripted(['Sales rose after the ad, so the ad caused it.\nAssumptions: none.\nVerdict: PASS','Sales rose after the ad; causation is not established.\nAssumptions: no control group.\nVerdict: PARTIAL PASS']);
+ s.gemini.verdicts=[{claims:[],argument:[{problem:'Causal claim from a before/after correlation.',severity:'major'}]},{claims:[],argument:[]}];
+ r=await cloudFor(s.gemini).chat({text:'Did the ad work?',bot:agent('analyse')});
+ assert.equal(s.requests.length,2);assert.match(lastUser(s.requests[1]),/major argument issue/);assert.equal(r.quality.verdict,'PARTIAL PASS');
+});
+
+test('the verifier fails open, and Review and chat are never verified',async()=>{
+ const broken={model:'fixture',generate:async body=>{if(isVerify(body))throw Error('verifier down');return {candidates:[{content:{role:'model',parts:[{text:'A clear letter.\nVerdict: PASS'}]}}]};}};
+ const r=await cloudFor(broken).chat({text:'Write a letter',bot:agent('write')});
+ assert.equal(r.reply,'A clear letter.\nVerdict: PASS');assert.ok(r.quality.issues.some(i=>/verification was unavailable/.test(i)));
+ for(const bot of [agent('review'),null]){const s=scripted(['Fine. https://example.org\nVerdict: PASS']);await cloudFor(s.gemini).chat({text:'Check',...(bot?{bot}:{})});assert.equal(s.verifies.length,0);}
 });
