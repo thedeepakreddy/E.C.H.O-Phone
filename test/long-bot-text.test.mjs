@@ -5,7 +5,8 @@ import {createBots,botState,MAX_GOAL} from '../lib/bots.js';
 import {createCloud,MAX_BOT_TEXT} from '../lib/cloud.js';
 import {createStore} from '../lib/store.js';
 
-const bot={id:'research',mode:'research',role:'Research',runId:'fixture'};
+// Write has no sourcing gate, so these tests isolate length handling.
+const bot={id:'write',name:'Write',mode:'write',role:'Write',runId:'fixture'};
 const cloudWith=generate=>createCloud({store:createStore({key:Buffer.alloc(32)}),tools:{},gemini:{model:'fixture',generate}});
 const answer=(text,finishReason='STOP')=>({candidates:[{finishReason,content:{role:'model',parts:[{text}]}}]});
 

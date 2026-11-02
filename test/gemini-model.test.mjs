@@ -8,7 +8,7 @@ function fixture(options={}) {
  const requests=[];
  const gemini=createGemini({apiKey:'fixture-not-a-key',...options,fetchImpl:async(url,init)=>{
   requests.push({url,body:JSON.parse(init.body)});
-  return Response.json({candidates:[{content:{role:'model',parts:[{text:'Fixture answer.'}]}}]});
+  return Response.json({candidates:[{content:{role:'model',parts:[{text:options.text??'Fixture answer.'}]}}]});
  }});
  return {gemini,requests};
 }
@@ -34,13 +34,16 @@ test('explicit model and per-request overrides remain authoritative and receive 
  assert.equal(requests[1].body.generationConfig.thinkingConfig.thinkingLevel,'high');
 });
 
+// A reply that satisfies every specialist's blocking quality gate, so each run is one request.
+const CONTRACT_REPLY='Answer (VERIFIED, https://example.org/source). Task B depends on task A; done when tests pass.\n\nQuality check: fixture.\nVerdict: PASS';
 test('ordinary Phone chat and all six Office specialists use the upgraded default client',async()=>{
- const {gemini,requests}=fixture();
+ const {gemini,requests}=fixture({text:CONTRACT_REPLY});
  const cloud=createCloud({gemini,store:createStore({key:Buffer.alloc(32)}),tools:{}});
  await cloud.chat({text:'Hello'});
  for(const id of ['research','plan','write','review','analyse','echo-assistant'])
   await cloud.chat({text:'Complete fixture task',bot:{id,name:id,role:'Fixture role',mode:'research',runId:`fixture-${id}`,model:'must-not-override'}});
  assert.equal(requests.length,7);
  assert.ok(requests.every(r=>r.url.endsWith('/models/gemini-3.8-flash:generateContent')));
- assert.ok(requests.every(r=>r.body.generationConfig.thinkingConfig.thinkingLevel==='low'));
+ // Chat stays responsive; specialists reason at the level their job needs.
+ assert.deepEqual(requests.map(r=>r.body.generationConfig.thinkingConfig.thinkingLevel),['low','high','high','medium','high','high','medium']);
 });

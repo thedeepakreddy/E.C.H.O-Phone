@@ -5,7 +5,7 @@ import {createCloud} from '../lib/cloud.js';
 const wait=async fn=>{for(let i=0;i<150;i++){if(await fn())return;await new Promise(r=>setTimeout(r,10));}throw new Error('Run did not settle');};
 test('Phone specialists share Echo chat’s configured brain/model, not a role-specific Claude client',async()=>{
  for(const model of ['configured-phone-brain-a','configured-phone-brain-b']){
-  const requests=[],gemini={model,generate:async(body,options)=>{requests.push({body,model:options.modelId});return {candidates:[{content:{role:'model',parts:[{text:'Verified fixture response.'}]}}]};}};
+  const requests=[],gemini={model,generate:async(body,options)=>{requests.push({body,model:options.modelId});return {candidates:[{content:{role:'model',parts:[{text:'Verified fixture response (VERIFIED, https://example.org/source). Task B depends on task A; done when tests pass.\nVerdict: PASS'}]}}]};}};
   const cloud=createCloud({gemini,store:createStore({key:Buffer.alloc(32)}),tools:{}});
   await cloud.chat({text:'Ordinary Echo chat'});
   for(const id of ['research','plan','write','review','analyse','echo-assistant'])await cloud.chat({text:'Specialist task',bot:{id,name:id,role:'Fixture role',mode:'research',model:'claude-must-not-override',runId:randomUUID()}});
