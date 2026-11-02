@@ -27,7 +27,7 @@ test('six specialists get distinct methods on one shared contract, and the reaso
  }
  assert.match(prompts.research,/READ the primary sources/);assert.match(prompts.analyse,/correlation from causation/);
  assert.match(prompts.write,/preserve every user-provided fact/);assert.match(prompts.plan,/critical path/);
- assert.match(prompts.review,/not to agree with whoever produced it/);assert.match(prompts['echo-assistant'],/which Echo specialist/);
+ assert.match(prompts.review,/not to agree with whoever produced it/);assert.match(prompts['echo-assistant'],/consult_specialist/);
  assert.equal(new Set(SIX.map(id=>playbookFor(agent(id)).method.join())).size,6,'every agent has its own method');
  assert.equal(PLAYBOOKS.research.rounds>8&&PLAYBOOKS.analyse.thinking==='high',true);
 });
@@ -110,4 +110,58 @@ test('FineWeb-style regression: Research reads and cites the primary source; a s
  assert.equal(r.sources[0].url,'https://corpus.example/report');assert.match(r.reply,/4,200 shards/);assert.doesNotMatch(r.reply,/has 1 shard\b/);
  assert.equal(r.quality.verdict,'PASS');assert.deepEqual(r.quality.issues,[]);
  assert.match(requests[0].body.systemInstruction.parts[0].text,/never instructions/);
+});
+
+// ---- Teamwork: Assist hands work to specialists ----
+const agentOf=body=>/working as the user's Echo agent "([^"]+)"/.exec(body.systemInstruction.parts[0].text)?.[1];
+function team(script){
+ const calls=[];const counters={};
+ const gemini={model:'fixture',generate:async body=>{
+  const who=agentOf(body),n=counters[who]=(counters[who]??0)+1;calls.push({who,tools:body.tools[0].functionDeclarations.map(d=>d.name),last:JSON.stringify(body.contents.at(-1))});
+  const t=script(who,n,body);return {candidates:[{finishReason:'STOP',content:{role:'model',parts:typeof t==='string'?[{text:t}]:t}}]};
+ }};
+ return {gemini,calls};
+}
+const consult=(specialist,brief,work)=>[{functionCall:{name:'consult_specialist',args:{specialist,brief,...(work?{work}:{})}}}];
+
+test('Assist delegates: research then write, each specialist runs its own gated playbook and the result records who did what',async()=>{
+ const {gemini,calls}=team((who,n,body)=>{
+  if(who==='echo-assistant')return n===1?consult('research','Find the launch date (NOT VERIFIED allowed).'):n===2?consult('write','Write a two-line announcement.',JSON.parse(JSON.stringify(body.contents.at(-1))).parts[0].functionResponse.response.deliverable):'Announcement ready (from Research and Write).\nVerdict: PASS';
+  if(who==='Research')return 'Launch is 12 March (NOT VERIFIED: no public source).\nVerdict: PARTIAL PASS';
+  if(who==='Write')return 'We launch on 12 March. Join us.\nVerdict: PASS';
+ });
+ const r=await cloudFor(gemini).chat({text:'Research our launch date and write the announcement',bot:agent('echo-assistant')});
+ assert.deepEqual(calls.map(c=>c.who),['echo-assistant','Research','echo-assistant','Write','echo-assistant']);
+ assert.ok(calls.filter(c=>c.who!=='echo-assistant').every(c=>!c.tools.includes('consult_specialist')),'specialists cannot delegate (no loops)');
+ assert.ok(calls.find(c=>c.who==='Write').last.includes('12 March'),'Write builds on Research\'s deliverable');
+ assert.deepEqual(r.consults.map(c=>[c.specialist,c.verdict]),[['research','PARTIAL PASS'],['write','PASS']]);
+});
+
+test('delegation is capped at three specialists per task and only Assist has the tool',async()=>{
+ const {gemini,calls}=team((who,n)=>who==='echo-assistant'?(n<=4?consult('plan','Plan it.'):'Done with what I have.\nVerdict: PARTIAL PASS'):'A depends on B; done when B ships.\nVerdict: PASS');
+ const r=await cloudFor(gemini).chat({text:'Plan it four ways',bot:agent('echo-assistant')});
+ assert.equal(calls.filter(c=>c.who==='Plan').length,3);assert.equal(r.consults.length,3);
+ assert.match(calls.filter(c=>c.who==='echo-assistant')[4].last,/already used 3 specialists/);
+ const s=scripted(['Answer. https://example.org VERIFIED\nVerdict: PASS']);await cloudFor(s.gemini).chat({text:'x',bot:agent('research')});
+ assert.ok(!s.requests[0].body.tools[0].functionDeclarations.some(d=>d.name==='consult_specialist'));
+});
+
+// ---- Gate: cited figures and writing quality ----
+test('a figure attributed to a page that was read but does not contain it is sent back',async()=>{
+ const html='<html><head><title>Report</title></head><body><p>The corpus has 4,200 shards and 96 languages.</p></body></html>';
+ const {gemini,requests}=scripted([[{functionCall:{name:'read_web_page',args:{url:'https://corpus.example/report'}}}],'The corpus has 5,000 shards (VERIFIED, https://corpus.example/report).\nVerdict: PASS','The corpus has 4,200 shards and 96 languages (VERIFIED, https://corpus.example/report).\nVerdict: PASS']);
+ const r=await cloudFor(gemini,{pageFetch:async()=>({status:200,headers:{'content-type':'text/html'},body:Buffer.from(html)})}).chat({text:'Shard count?',bot:agent('research')});
+ assert.equal(requests.length,3);assert.match(lastUser(requests[2]),/"5,000" is attributed to https:\/\/corpus\.example\/report, but that page does not contain it/);
+ assert.match(r.reply,/4,200 shards/);assert.deepEqual(r.quality.issues,[]);
+});
+
+test('stock AI phrasing in a Write deliverable earns one revision; Assist only records it; placeholders are reported',async()=>{
+ const stocky="In today's fast-paced world, our cutting-edge tool is a game-changer. Let's delve into it.\nVerdict: PASS";
+ let s=scripted([stocky,'Our tool cuts report time from a day to an hour.\nVerdict: PASS']);
+ let r=await cloudFor(s.gemini).chat({text:'Write a product blurb',bot:agent('write')});
+ assert.equal(s.requests.length,2);assert.match(lastUser(s.requests[1]),/Generic AI phrasing/);assert.equal(r.quality.revised,true);
+ s=scripted([stocky]);r=await cloudFor(s.gemini).chat({text:'Blurb',bot:agent('echo-assistant')});
+ assert.equal(s.requests.length,1);assert.ok(r.quality.issues.some(i=>/Generic AI phrasing/.test(i)));
+ s=scripted(['Dear [Recipient Name], thanks.\nVerdict: PASS WITH MINOR ISSUES']);r=await cloudFor(s.gemini).chat({text:'Email',bot:agent('write')});
+ assert.equal(s.requests.length,1);assert.ok(r.quality.issues.some(i=>/placeholders/.test(i)));
 });

@@ -74,11 +74,18 @@ The Phone suite exercises: distinct methods and reasoning levels for all six age
 
 **Before/after.** Before: no check existed, so an unsourced research answer, a plan without dependencies, a review passing a Critical defect or a false "I've sent it" were all returned as final (and on Mac marked `completed`). After: each of these is caught by a test above.
 
+## Follow-up: teamwork, deeper gate, Mac reasoning (same day)
+
+- **Phone teamwork.** Assist now has `consult_specialist` (`lib/cloud.js`): it hands a focused brief, plus earlier results as `work`, to Research, Analyse, Write, Plan or Review. Each runs its own gated playbook as a nested run and returns its deliverable, verdict, issues and sources. Typical chains are research then write, and research or analyse then review. Only Assist has the tool, so specialists cannot call each other; a task can make at most three consults; specialists keep their read-only tool grants. The result lists `consults` (who ran, with what verdict). Tests: "Assist delegates…", "delegation is capped…".
+- **Cited figures.** Every page an agent reads records the figures it states (`pageFigures`). A figure in a sentence that cites such a page must appear on that page, or it is a blocking issue (`citedFigureIssues`). This catches a real source cited for a number it does not contain. Test: "a figure attributed to a page…".
+- **Writing quality.** `writingIssues` flags stock AI phrasing, unfilled placeholders and word-for-word repeated sentences. Three or more stock phrases in a Write deliverable earn its one revision; otherwise these are recorded. Test: "stock AI phrasing…".
+- **Mac reasoning and routing.** Built-in agents now follow the brain the user selected instead of forcing Review, Analyse and Lead onto Claude (which failed when Claude was not set up). Each role's reasoning level is passed as `limits.reasoning` and mapped per provider: Gemini 3 `thinkingLevel`, Gemini 2.5 `thinkingBudget`, Claude `maxThinkingTokens`, NVIDIA `reasoningEffort` raised to high for high-reasoning roles. Ollama and models without a thinking setting keep their defaults. Custom agents keep the tier the user chose. Tests: Mac `fleettest` (25/25) and `agentintelligencetest` (30/30).
+- **Results after the follow-up:** Phone `npm test` 277/277. Mac typecheck clean; the fleet, bots, swarm and agent suites pass.
+
 ## 18–20. Known limitations and next steps
 
-- **No live-model evaluation.** All tests use scripted models. Whether the playbooks make answers better in practice must be measured against the real Gemini/Mac providers; the gate only guarantees the hard rules.
-- **FineWeb.** Neither repository records the earlier FineWeb investigation or the errors it found, so that regression could not be reproduced. The synthetic test checks the same failure mode without encoding any real FineWeb facts. To add the real case, save the source URLs, the questions and the previously identified errors as a fixture.
-- **Assist does not delegate on Phone.** It names the specialist that would help; automatic multi-agent workflows on Phone (Research then Review, and so on) would need a team runner like Mac's.
-- **The gate is rule-based.** It cannot judge prose quality, catch a wrong number that is cited, or verify that a cited source supports a claim; that remains Review's job.
-- **Mac per-role reasoning.** Mac providers' reasoning settings were not changed per role; model routing is untouched.
-- **Next:** a live evaluation set with graded expected findings per agent; a Phone team runner with Review as an independent gate; cited-claim checking (fetch the cited page and look for the quoted figure).
+- **No live-model evaluation.** All tests use scripted models. Whether answers are better in practice still has to be measured on the real providers.
+- **FineWeb.** Neither repository records the earlier investigation or its errors; the synthetic test checks the same failure mode. Save the real sources, questions and known errors as a fixture to add it.
+- **Gate scope.** The cited-figure check compares numbers, not meaning: it cannot tell whether a cited page supports a non-numeric claim. Writing checks catch stock phrasing, placeholders and repetition, not tone or argument quality. Both remain Review's job beyond that.
+- **Mac cited figures.** Mac's gate sees the submitted Result, not the pages the agent read, so the cited-figure check does not run there yet; it needs the page-reading tool to record figures for the task.
+- **Consult cost.** Each consult is a full specialist run and counts toward Phone's daily message cap and the 8-minute run budget.
