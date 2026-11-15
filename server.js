@@ -23,6 +23,9 @@ import {createMacUpdates} from './lib/mac-updates.js';
  *   UPSTASH_REDIS_REST_TOKEN
  *   QSTASH_TOKEN               the 5-minute tick (QSTASH_URL if the console shows one)
  *   GEMINI_EMBED_MODEL         search by meaning in saved memory (default gemini-embedding-001)
+ *   GEMINI_AGENT_MODEL         the model bots reason on (default gemini-4-hydrogen, free tier; "off" to use GEMINI_MODEL)
+ *   GEMINI_LIVE_MODEL          live voice conversations (default gemini-3.8-live, free tier; "off" for record-and-send voice)
+ *   GEMINI_LIVE_VOICE          Echo's speaking voice in live conversations (default Charon)
  *   GEMINI_BROWSE_MODEL        Echo's browsing, comma-separated in order (default: the two best Flash models the key can use)
  *
  * Get started issues a standalone Phone session (lib/secure.js), with no Mac
@@ -74,7 +77,7 @@ const PUBLIC = join(fileURLToPath(new URL(".", import.meta.url)), "public");
 export const APP_VERSION = (() => {
   const h = createHash("sha256");
   for(const f of ['agent-office-avatar.js','agent-office-behavior.js','agent-office-props.js','agent-office-environment.js','agent-office-navigation.js','office-assets/cyberpunk-city-v1.png','office-assets/echo-panel-wall.jpg']){try{h.update(readFileSync(join(PUBLIC,f)));}catch{/* Missing in isolated fixtures. */}}
-  for (const f of ["markdown.js", "markdown.css", "vendor/markdown-it.min.js", "vendor/purify.min.js", "index.html", "app.js", "experience.js", "voice-session.js", "speech-particles.js", "bots.js", "bots.css", "agent-office.js", "agent-office.css", "agent-office-scene.js", "office-assets/office.webp", "office-assets/research.webp", "office-assets/plan.webp", "office-assets/write.webp", "office-assets/review.webp", "vendor/three.module.min.js", "app.css", "humanoid-core.js", "sw.js", "admin.html", "admin.js", "admin.css"]) { try { h.update(readFileSync(join(PUBLIC, f))); } catch { /* missing in tests */ } }
+  for (const f of ["markdown.js", "markdown.css", "vendor/markdown-it.min.js", "vendor/purify.min.js", "index.html", "app.js", "experience.js", "voice-session.js", "live-voice.js", "speech-particles.js", "bots.js", "bots.css", "agent-office.js", "agent-office.css", "agent-office-scene.js", "office-assets/office.webp", "office-assets/research.webp", "office-assets/plan.webp", "office-assets/write.webp", "office-assets/review.webp", "vendor/three.module.min.js", "app.css", "humanoid-core.js", "sw.js", "admin.html", "admin.js", "admin.css"]) { try { h.update(readFileSync(join(PUBLIC, f))); } catch { /* missing in tests */ } }
   return h.digest("hex").slice(0, 12);
 })();
 const TYPES = {
@@ -93,7 +96,7 @@ const SECURITY = {
   "x-content-type-options": "nosniff",
   "strict-transport-security": "max-age=31536000",
   "content-security-policy":
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https://upload.wikimedia.org https://thumb.wikimedia.org data: blob:; media-src 'self' blob: mediastream:; connect-src 'self'; manifest-src 'self'; worker-src 'self'",
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https://upload.wikimedia.org https://thumb.wikimedia.org data: blob:; media-src 'self' blob: mediastream:; connect-src 'self' wss://generativelanguage.googleapis.com; manifest-src 'self'; worker-src 'self'",
 };
 /** Phone mode: requests per device per minute, and how big a request may be. */
 export const CLOUD_RATE = 30;
@@ -305,6 +308,8 @@ export function createRelay({
   /** The address the iPhone's Shortcut posts today's events to; the key in it only lets it do that. */
   const calendarUrl = (key) => `${publicUrl.replace(/\/+$/, "")}/cal/${key}`;
   const cloudHits = new Map();
+  /** Buttons and chips from a live voice turn's tools, held until that turn is saved. In memory: losing them loses only the buttons. */
+  const liveEffects = new Map();
   /** Each phone's cookies for the sites it uses in the Browser, sealed in the store, written a moment after they change. */
   const jars = new Map();
   function jarFor(device) {
@@ -753,6 +758,8 @@ export function createRelay({
       return send(res, 200, {
         ready: Boolean(cloud), model: gemini?.model ?? null, store: store.remote ? "upstash" : "memory",
         macOnline, usage: cloud ? await cloud.usage().catch(() => null) : null, passExpires: claims.exp,
+        // Live voice needs Gemini Live; agents may reason on a stronger model than chat.
+        live: Boolean(cloud && gemini?.liveModel && gemini?.liveToken), agentModel: cloud ? cloud.agentModel() : null,
       });
     }
     const device = claims.device;
@@ -1152,6 +1159,54 @@ export function createRelay({
         return send(res,400,{message:'Choose a supported bot action.'});
       }catch(e){return sendCloudError(res,e);}
     }
+    // ---- Live voice: the phone talks to Gemini Live directly (lib/cloud.js liveStart) ----
+    if (path.startsWith("/cloud/live/")) {
+      if (req.method !== "POST") return send(res, 405, { message: "Method not allowed." });
+      if (!cloud) return send(res, 503, { error: "setup", message: "Phone mode isn't set up yet: add GEMINI_API_KEY on Render." });
+      if (rateLimited(claims.device)) return send(res, 429, { error: "busy", message: "Slow down a little — too many requests this minute." });
+      try {
+        const body = await readJson(req, CLOUD_BODY);
+        const context = { ...(body.context && typeof body.context === "object" ? body.context : {}), macOnline };
+        const threadId = body.threadId ? String(body.threadId).slice(0, 80) : null;
+        const effectsKey = `${device}:${threadId ?? "legacy"}`;
+        if (path === "/cloud/live/start") {
+          const [mem, t] = await Promise.all([memoryFor(device, context.tz).catch(() => null), threadId ? withConversations(device, (st) => threadFor(st, threadId), { save: false }) : null]);
+          liveEffects.delete(effectsKey);
+          const history = (t?.messages ?? []).map((m) => ({ role: m.from === "you" ? "user" : "echo", text: m.text }));
+          return send(res, 200, await cloud.liveStart({ history, context: { ...context, threadId }, memory: mem }));
+        }
+        if (path === "/cloud/live/tool") {
+          const name = String(body.name ?? "").slice(0, 60);
+          const callId = /^[a-zA-Z0-9_.:-]{1,120}$/.test(body.callId) ? body.callId : randomUUID();
+          const mem = await memoryFor(device, context.tz, callId).catch(() => null);
+          const { response, effects } = await cloud.liveTool({ name, args: body.args && typeof body.args === "object" ? body.args : {}, context: { ...context, threadId }, memory: mem });
+          // What the tool put under the reply (buttons, saved chips, sources) waits here for the spoken turn it belongs to.
+          const kept = liveEffects.get(effectsKey) ?? { actions: [], sources: [], saved: [], captures: [], references: [], at: now() };
+          for (const key of ["actions", "sources", "saved", "captures", "references"]) kept[key] = [...kept[key], ...effects[key]].slice(0, 8);
+          kept.at = now();
+          liveEffects.delete(effectsKey); liveEffects.set(effectsKey, kept);
+          if (liveEffects.size > 200) liveEffects.delete(liveEffects.keys().next().value);
+          return send(res, 200, { response });
+        }
+        if (path === "/cloud/live/turn") {
+          const requestId = /^[a-zA-Z0-9_-]{8,80}$/.test(body.requestId) ? body.requestId : null;
+          const said = String(body.user ?? "").replace(/\s+/g, " ").trim().slice(0, 4000), reply = String(body.echo ?? "").trim().slice(0, 12000);
+          if (!requestId || !reply) return send(res, 400, { error: "input", message: "Nothing to save from that voice turn." });
+          const result = await withLock(`turn:${device}:${threadId ?? "legacy"}`, async () => {
+            const t = threadId ? await withConversations(device, (st) => threadFor(st, threadId), { save: false }) : null;
+            const previous = t?.receipts.find((r) => r.id === requestId); if (previous) return previous.result;
+            const kept = liveEffects.get(effectsKey); liveEffects.delete(effectsKey);
+            const fresh = kept && now() - kept.at < 10 * 60_000 ? kept : null;
+            const r = { reply, transcript: said || null, voice: true, actions: withLinks((fresh?.actions ?? []).slice(0, 4).map((a, i) => ({ ...a, id: `a${i + 1}` }))),
+              sources: (fresh?.sources ?? []).slice(0, 4), saved: fresh?.saved ?? [], captures: fresh?.captures ?? [], references: (fresh?.references ?? []).slice(0, 6) };
+            if (t) await withConversations(device, (st) => recordTurn(threadFor(st, threadId), { requestId, text: null, result: r, now: now() }));
+            return r;
+          });
+          return send(res, 200, result);
+        }
+        return send(res, 404, "Not found");
+      } catch (e) { return sendCloudError(res, e); }
+    }
     if (path === "/cloud/chat" || path === "/cloud/voice") {
       if (!cloud) return send(res, 503, { error: "setup", message: "Phone mode isn't set up yet: add GEMINI_API_KEY on Render." });
       if (rateLimited(claims.device)) return send(res, 429, { error: "busy", message: "Slow down a little — too many messages this minute." });
@@ -1511,13 +1566,17 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const relaySecret = paired ? secret : randomBytes(32).toString("hex");
   const keys = deriveKeys(relaySecret);
   const store = createStore({ url: env.UPSTASH_REDIS_REST_URL, token: env.UPSTASH_REDIS_REST_TOKEN, key: keys.store });
+  // Unset keeps the default model; "off" turns that feature's model off.
+  const optionalModel = (key, value) => { const v = String(value ?? "").trim(); return !v ? {} : { [key]: /^(off|none|false)$/i.test(v) ? null : v }; };
   const gemini = paired && env.GEMINI_API_KEY ? createGemini({
     apiKey: env.GEMINI_API_KEY.trim(), model: env.GEMINI_MODEL?.trim() || undefined,
     embedModel: (env.GEMINI_EMBED_MODEL || "gemini-embedding-001").trim(), base: env.GEMINI_BASE || undefined,
+    ...optionalModel("agentModel", env.GEMINI_AGENT_MODEL), ...optionalModel("liveModel", env.GEMINI_LIVE_MODEL),
+    ...(env.GEMINI_LIVE_VOICE?.trim() ? { liveVoice: env.GEMINI_LIVE_VOICE.trim() } : {}),
   }) : null;
   const relay = createRelay({
     secret: relaySecret, store, gemini, publicUrl: env.RENDER_EXTERNAL_URL || "https://echo-phone.onrender.com",
-    limits: { messages: Number(env.PHONE_DAILY_MESSAGES) || 200, snaps: Number(env.PHONE_DAILY_SNAPS) || 30, browseSteps: Number(env.PHONE_DAILY_BROWSE) || 300 },
+    limits: { voiceSessions: Number(env.PHONE_DAILY_VOICE) || 60, messages: Number(env.PHONE_DAILY_MESSAGES) || 200, snaps: Number(env.PHONE_DAILY_SNAPS) || 30, browseSteps: Number(env.PHONE_DAILY_BROWSE) || 300 },
     adminPassword: env.ECHO_ADMIN_PASSWORD || "", deployment: { commit: env.RENDER_GIT_COMMIT, scheduler: Boolean(env.QSTASH_TOKEN) },
   });
   console.log(`Phone mode: brain ${gemini ? gemini.model : "off (no GEMINI_API_KEY)"}, store ${store.remote ? "Upstash" : "memory only (no UPSTASH_REDIS_REST_URL/TOKEN)"}`);
@@ -1528,6 +1587,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     void gemini.listModels()
       .then((names) => {
         gemini.fallbackModels = pickFallbackModels(names, gemini.model);
+        // Agents only use their stronger model when this key really has it.
+        if (gemini.agentModel && !names.includes(gemini.agentModel)) { console.log(`Agents: ${gemini.agentModel} isn't offered to this key; using ${gemini.model}`); gemini.agentModel = null; }
+        else console.log(`Agents: ${gemini.agentModel ?? gemini.model}`);
         if (!chosen) gemini.browseModels = pickBrowseModels(names, gemini.model, 2);
         console.log(`Phone overload fallback: ${gemini.fallbackModels.join(', ') || 'none advertised by this key'}`);
         if (!chosen) console.log(`Browsing: ${[...gemini.browseModels, gemini.model].join(" → ")}`);
