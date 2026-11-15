@@ -33,7 +33,9 @@ import {createMacUpdates} from './lib/mac-updates.js';
  */
 import http from "node:http";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import { brotliCompress, gzip, constants as zlib } from "node:zlib";
+import { promisify } from "node:util";
 import { readFileSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,6 +83,9 @@ const TYPES = {
   ".obj":"text/plain; charset=utf-8", ".mhskel":"application/json", ".mhw":"application/json", ".mhclo":"text/plain; charset=utf-8",
   ".gltf":"model/gltf+json", ".bin":"application/octet-stream",
 };
+const brotli = promisify(brotliCompress), gzipped = promisify(gzip);
+/** Text the phone downloads on every open; pictures are already compressed. */
+const COMPRESSIBLE = /\.(html|css|js|svg|txt|webmanifest|obj|mhskel|mhw|mhclo|gltf)$/;
 // Everything the phone app is allowed to load: this origin and nothing else.
 const SECURITY = {
   "x-frame-options": "DENY",
@@ -224,6 +229,14 @@ export function createRelay({
       if (typeof save === 'function' ? save() : save) await store.set(key, value, ttl);
       return result;
     });
+    const tail = run.catch(() => {});
+    keyLocks.set(key, tail);
+    tail.then(() => { if (keyLocks.get(key) === tail) keyLocks.delete(key); });
+    return run;
+  }
+  /** The same one-at-a-time queue with nothing loaded or saved: for work that only needs its turn. */
+  function withLock(key, fn) {
+    const run = (keyLocks.get(key) ?? Promise.resolve()).then(fn);
     const tail = run.catch(() => {});
     keyLocks.set(key, tail);
     tail.then(() => { if (keyLocks.get(key) === tail) keyLocks.delete(key); });
@@ -711,14 +724,16 @@ export function createRelay({
     return JSON.parse((await readBody(req, limit)).toString("utf8") || "{}");
   }
   const CLOUD_STATUS = { setup: 503, unavailable: 503, cap: 429, quota: 429, minute: 429, busy: 429, input: 400, failed: 502 };
-  function sendCloudError(res, e) {
-    if (e?.suspended) return send(res, 403, { error: "suspended", message: e.message });
-    if (e?.input) return send(res, 400, { error: "input", message: e.message });
-    if (e instanceof CloudError) return send(res, CLOUD_STATUS[e.kind] ?? 502, { error: e.kind, message: e.message, resetsAt: e.resetsAt ?? null, retryAfter: e.retryAfter ?? null, retryable: e.retryable === true, ...(e.retryable && typeof e.retryVersion === 'string' ? { retryVersion: e.retryVersion } : {}) });
-    if (e?.status === 413) return send(res, 413, { error: "input", message: "That's too long to send." });
-    if (e instanceof SyntaxError) return send(res, 400, { error: "input", message: "Bad request." });
-    return send(res, 502, { error: "failed", message: "Phone mode had a problem. Try again." });
+  /** A failure as the phone is told about it: [HTTP status, body]. */
+  function cloudFailure(e) {
+    if (e?.suspended) return [403, { error: "suspended", message: e.message }];
+    if (e?.input) return [400, { error: "input", message: e.message }];
+    if (e instanceof CloudError) return [CLOUD_STATUS[e.kind] ?? 502, { error: e.kind, message: e.message, resetsAt: e.resetsAt ?? null, retryAfter: e.retryAfter ?? null, retryable: e.retryable === true, ...(e.retryable && typeof e.retryVersion === 'string' ? { retryVersion: e.retryVersion } : {}) }];
+    if (e?.status === 413) return [413, { error: "input", message: "That's too long to send." }];
+    if (e instanceof SyntaxError) return [400, { error: "input", message: "Bad request." }];
+    return [502, { error: "failed", message: "Phone mode had a problem. Try again." }];
   }
+  const sendCloudError = (res, e) => send(res, ...cloudFailure(e));
 
   async function cloudRoute(req, res, path) {
     const claims = await cloudClaims(req);
@@ -1145,17 +1160,33 @@ export function createRelay({
       const timer = setTimeout(() => turn.abort(new CloudError('unavailable', "Echo took too long to respond. Check Chat and Today before sending this request again.", { retryable: false })), 30_000);
       const disconnected = () => { if (!res.writableEnded) turn.abort(new DOMException('The phone disconnected.', 'AbortError')); };
       res.once('close', disconnected);
+      // A phone that asks for it gets the answer as it is written (server-sent
+      // events): "delta" pieces, "tool" while Echo looks something up, "reset"
+      // when shown text is withdrawn, then "done" with the saved result or
+      // "error". Nothing is streamed until there is something to show, so a
+      // failure before that still answers with its ordinary status code.
+      const live = path === "/cloud/chat" && String(req.headers.accept ?? "").includes("text/event-stream");
+      let streaming = false;
+      const emit = (event, data) => {
+        if (res.writableEnded || res.destroyed) return;
+        if (!streaming) {
+          streaming = true;
+          res.writeHead(200, { ...SECURITY, "cache-control": "no-store, no-transform", "content-type": "text/event-stream; charset=utf-8", "x-accel-buffering": "no" });
+        }
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      };
       try {
         const body = await readJson(req, path === "/cloud/voice" ? CLOUD_VOICE_BODY : CLOUD_BODY);
         const context = { ...(body.context && typeof body.context === "object" ? body.context : {}), macOnline };
         if (path === "/cloud/voice" && !/^[A-Za-z0-9+/=]{100,}$/.test(String(body.audio ?? ""))) return send(res, 400, { error: "input", message: "That recording didn't come through." });
         const requestId = /^[a-zA-Z0-9_-]{8,80}$/.test(body.requestId) ? body.requestId : randomUUID();
-        const mem = await memoryFor(device, context.tz,requestId).catch(() => null);
         const threadId = body.threadId ? String(body.threadId).slice(0, 80) : null;
+        // Memory and the conversation are separate store keys: read them together, not one after the other.
+        const remembered = memoryFor(device, context.tz, requestId).catch(() => null);
         // A separate turn lock permits memory and folder tools to change their own store keys.
-        const result = await withKey(`turn:${device}:${threadId ?? "legacy"}`, () => ({}), async () => {
+        const result = await withLock(`turn:${device}:${threadId ?? "legacy"}`, async () => {
           await ensure();
-          const t = threadId ? await withConversations(device, (st) => threadFor(st, threadId), { save: false }) : null;
+          const [mem, t] = await Promise.all([remembered, threadId ? withConversations(device, (st) => threadFor(st, threadId), { save: false }) : null]);
           const previous = t?.receipts.find((r) => r.id === requestId); if (previous) return previous.result;
           const retryVersion = t?.messages.at(-1)?.k ?? '';
           if (t && Object.hasOwn(body, 'retryVersion') && body.retryVersion !== retryVersion)
@@ -1164,7 +1195,8 @@ export function createRelay({
           let r;
           try {
             r = await cloud.chat({ history, text: path === "/cloud/chat" ? body.text : undefined, audio: path === "/cloud/voice" ? body.audio : undefined,
-              context: { ...context, threadId }, memory: mem, signal: turn.signal, ensure });
+              context: { ...context, threadId }, memory: mem, signal: turn.signal, ensure,
+              ...(live ? { onStream: (event) => emit(event.type, event.type === "delta" ? { text: event.text } : event.type === "tool" ? { name: event.name } : {}) } : {}) });
           } catch (error) {
             if (t && error instanceof CloudError && error.retryable === true) error.retryVersion = retryVersion;
             throw error;
@@ -1173,9 +1205,18 @@ export function createRelay({
           for (const a of r.actions) if ((a.type === "calendar" || a.type === "reminder") && validEvent(a.data)) a.url = icsUrl(a.data);
           if (t) await withConversations(device, (st) => recordTurn(threadFor(st, threadId), { requestId, text: path === "/cloud/chat" ? String(body.text).slice(0, 4000) : null, result: r, now: now() }));
           return r;
-        }, { save: false });
-        return send(res, 200, result);
-      } catch (e) { if (!res.destroyed) return sendCloudError(res, e); }
+        });
+        if (!live) return send(res, 200, result);
+        emit("done", result);
+        res.end();
+      } catch (e) {
+        if (res.destroyed) return;
+        if (!streaming) return sendCloudError(res, e);
+        const [status, failure] = cloudFailure(e);
+        res.adminErrorCode = failure.error;
+        emit("error", { status, ...failure });
+        res.end();
+      }
       finally { clearTimeout(timer); res.removeListener('close', disconnected); }
     }
     return send(res, 404, "Not found");
@@ -1335,20 +1376,48 @@ export function createRelay({
     return send(res, 200, { ok: true, at: now() });
   }
 
-  async function serveStatic(res, path) {
+  /**
+   * The app's files, read once and kept: each with a fingerprint (ETag) and,
+   * for text, a compressed copy. An open app that already has the current file
+   * gets a 304 with no body; a new one downloads about a quarter of the bytes.
+   * A file that changes on disk is read again.
+   */
+  const assets = new Map();
+  async function asset(file, name) {
+    const { mtimeMs, size } = await stat(file);
+    const stamp = `${mtimeMs}:${size}`;
+    let entry = assets.get(file);
+    if (entry?.stamp !== stamp) {
+      let data = await readFile(file);
+      // The page knows which version of the app it is, to notice a newer one (public/app.js).
+      if (name === "index.html") data = Buffer.from(data.toString("utf8").replace("__APP_VERSION__", APP_VERSION));
+      entry = { stamp, data, etag: `"${createHash("sha256").update(data).digest("base64url").slice(0, 22)}"`, encoded: new Map() };
+      assets.set(file, entry);
+    }
+    return entry;
+  }
+  async function serveStatic(req, res, path) {
     const name = path === "/" ? "index.html" : ["/admin", "/admin/"].includes(path) ? "admin.html" : path.slice(1);
     const file = normalize(join(PUBLIC, name));
     if (!file.startsWith(PUBLIC + "/") || !TYPES[extname(file)]) return send(res, 404, "Not found");
     try {
-      let data = await readFile(file);
-      // The page knows which version of the app it is, to notice a newer one (public/app.js).
-      if (name === "index.html") data = Buffer.from(data.toString("utf8").replace("__APP_VERSION__", APP_VERSION));
+      const entry = await asset(file, name);
       // The shell and the service worker must update the moment a new version
       // is deployed; the reactor art can sit in the cache.
-      const cache = /\.(png|jpg)$/.test(file) ? "public, max-age=86400" : "no-cache";
-      send(res, 200, data, { "content-type": TYPES[extname(file)], "cache-control": cache });
+      const headers = { "content-type": TYPES[extname(file)], "cache-control": /\.(png|jpg)$/.test(file) ? "public, max-age=86400" : "no-cache", etag: entry.etag, vary: "accept-encoding" };
+      if (String(req.headers["if-none-match"] ?? "").split(",").some((tag) => tag.trim().replace(/^W\//, "") === entry.etag)) {
+        res.writeHead(304, { ...SECURITY, ...headers });
+        return void res.end();
+      }
+      const accepts = String(req.headers["accept-encoding"] ?? "");
+      const encoding = !COMPRESSIBLE.test(file) || entry.data.length < 1024 ? null : /\bbr\b/.test(accepts) ? "br" : /\bgzip\b/.test(accepts) ? "gzip" : null;
+      if (!encoding) return send(res, 200, entry.data, headers);
+      if (!entry.encoded.has(encoding)) entry.encoded.set(encoding, encoding === "br"
+        ? brotli(entry.data, { params: { [zlib.BROTLI_PARAM_QUALITY]: 6, [zlib.BROTLI_PARAM_SIZE_HINT]: entry.data.length } })
+        : gzipped(entry.data, { level: 6 }));
+      send(res, 200, await entry.encoded.get(encoding), { ...headers, "content-encoding": encoding });
     } catch {
-      send(res, 404, "Not found");
+      if (!res.headersSent) send(res, 404, "Not found");
     }
   }
 
@@ -1416,7 +1485,7 @@ export function createRelay({
       return send(res, 404, "Not found");
     }
     if (MAC_ROUTES.has(path)) return forward(req, res, path, url.search);
-    if (req.method === "GET") return serveStatic(res, path);
+    if (req.method === "GET") return serveStatic(req, res, path);
     send(res, 404, "Not found");
   };
   return { handler, keys, tick, vapid, state: () => ({ online: online(), queued: queue.length, waiting: waiters.length, inFlight: inFlight.size, admitted:admitted.size, passGen }) };

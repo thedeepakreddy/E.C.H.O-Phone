@@ -622,6 +622,54 @@
     if (!r.ok) throw Object.assign(new Error(d.message || `HTTP ${r.status}`), { status: r.status, data: d });
     return d;
   }
+  /**
+   * The same request, answered as Echo writes it. The relay sends events:
+   * "delta" (more of the answer), "tool" (what Echo is looking up), "reset"
+   * (text shown so far is withdrawn), then "done" with the saved reply or
+   * "error". A relay that answers the old way (plain JSON) still works.
+   */
+  async function cloudStream(path, json, { signal, onEvent }) {
+    await ensurePhoneSession();
+    signal?.throwIfAborted();
+    const r = await fetch(path, {
+      method: "POST",
+      headers: { "x-echo-pass": PASS, "x-echo-installation": INSTALLATION, "content-type": "application/json", accept: "text/event-stream" },
+      body: JSON.stringify(json),
+      signal,
+    });
+    if (!r.body || !String(r.headers.get("content-type") || "").includes("text/event-stream")) {
+      const d = await r.json().catch(() => ({}));
+      if (r.status === 401) { PASS = ""; store.set("echo_pass", null); cloudInfo = null; showWelcome(); renderMode(); }
+      if (!r.ok) throw Object.assign(new Error(d.message || `HTTP ${r.status}`), { status: r.status, data: d });
+      return d;
+    }
+    const reader = r.body.getReader(), decoder = new TextDecoder();
+    let buffer = "", result = null;
+    const take = (block) => {
+      let event = "message", data = "";
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      if (!data) return;
+      const d = JSON.parse(data);
+      if (event === "done") result = d;
+      else if (event === "error") throw Object.assign(new Error(d.message || "Phone mode had a problem. Try again."), { status: d.status, data: d });
+      else onEvent(event, d);
+    };
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const blocks = buffer.split("\n\n");
+        buffer = blocks.pop();
+        for (const block of blocks) take(block);
+      }
+    } finally { reader.cancel().catch(() => {}); }
+    if (!result) throw Object.assign(new Error("The connection dropped."), { data: { message: "The connection dropped before Echo finished. Check Chat before sending again." } });
+    return result;
+  }
   // Only categorical diagnostics leave the phone: never error text, URLs or conversation content.
   let diagnosticAt = 0;
   function reportProblem(feature, code) {
@@ -1044,11 +1092,48 @@
     put(n);
     lastAt = Math.max(lastAt, m.at);
   }
+  // Echo's answer while it is still being written: one bubble, repainted at
+  // most once a frame, replaced by the saved message when the reply is done.
+  const TOOL_STATUS = {
+    web_search: "Searching the web…", search_research: "Searching research papers…", read_web_page: "Reading the page…", image_search: "Finding pictures…",
+    get_weather: "Checking the weather…", world_events: "Checking world events…", recall_memory: "Looking through what you saved…", get_today: "Checking Today…",
+    save_memory: "Saving…", remind_me: "Saving to Today…", capture_commitment: "Saving to Today…", update_commitment: "Updating Today…", run_bot: "Handing it to a bot…",
+  };
+  let live = null;
+  function paintLive() {
+    if (!live) return;
+    live.frame = 0;
+    if (!live.node) { live.node = el("div", "msg echo glass live"); live.node.setAttribute("aria-live", "off"); }
+    clear(live.node);
+    if (live.text) live.node.appendChild(window.EchoMarkdown.render(live.text));
+    else live.node.appendChild(el("span", "via", live.status));
+    const typing = $("typing");
+    if (typing) typing.hidden = !!live.text;
+    if (live.node.parentNode !== messagesEl || live.node.nextSibling !== typing) messagesEl.insertBefore(live.node, typing);
+    if (stickToBottom) scrollMessages();
+  }
+  function liveEvent(event, d, threadId) {
+    if (event === "delta") { live ??= { text: "", status: "", threadId }; live.text += d.text; }
+    else if (event === "tool") { if (!TOOL_STATUS[d.name]) return; live ??= { text: "", status: "", threadId }; live.status = TOOL_STATUS[d.name]; live.text = ""; }
+    else if (event === "reset") { if (!live) return; live.text = ""; if (!live.status) return endLive(); }
+    else return;
+    if (live.threadId !== currentThread) return;
+    live.frame ||= requestAnimationFrame(paintLive);
+  }
+  function endLive() {
+    if (!live) return;
+    cancelAnimationFrame(live.frame);
+    live.node?.remove();
+    live = null;
+    const typing = $("typing");
+    if (typing) typing.hidden = false;
+  }
   function renderChat() {
     const fromBottom = stickToBottom ? null : messagesEl.scrollHeight - messagesEl.scrollTop;
     clear(messagesEl); lastDay = ""; lastAt = 0;
     for (const m of byTime()) addMessage(m);
     renderTyping(chatTyping || cloudBusy);
+    if (live && live.threadId === currentThread) paintLive();
     if (fromBottom == null) scrollMessages(); else messagesEl.scrollTop = messagesEl.scrollHeight - fromBottom;
   }
   function putMessage(m) {
@@ -1187,8 +1272,12 @@
     const timer = setTimeout(() => { timedOut = true; abort.abort(new DOMException('Echo took too long to respond.', 'TimeoutError')); }, 45_000);
     setCloudBusy(true);
     try {
-      const d = await Promise.race([cloudApi(path, request, { signal: abort.signal }), cancelled]);
+      const ask = path === "/cloud/chat"
+        ? cloudStream(path, request, { signal: abort.signal, onEvent: (event, data) => { if (!abort.signal.aborted && current() && DEV === requestAccount) liveEvent(event, data, request.threadId); } })
+        : cloudApi(path, request, { signal: abort.signal });
+      const d = await Promise.race([ask, cancelled]);
       clearTimeout(timer);
+      endLive();
       if (abort.signal.aborted || !current() || DEV !== requestAccount) return null;
       const failed = chatCache.find(m => m.k === failureKey);
       if (failed) {
@@ -1242,6 +1331,7 @@
       return null;
     } finally {
       clearTimeout(timer); abort.signal.removeEventListener('abort', cancel);
+      endLive();
       if (cloudAbort === abort) { setCloudBusy(false); renderChat(); }
     }
   }
