@@ -36,7 +36,7 @@ test('explicit model and per-request overrides remain authoritative and receive 
 
 // A reply that satisfies every specialist's blocking quality gate, so each run is one request.
 const CONTRACT_REPLY='Answer (VERIFIED, https://example.org/source). Task B depends on task A; done when tests pass.\n\nQuality check: fixture.\nVerdict: PASS';
-test('ordinary Phone chat and all six Office specialists use the upgraded default client',async()=>{
+test('Phone chat stays on the quick model; all six Office specialists reason on Gemini 4 Hydrogen',async()=>{
  const {gemini,requests}=fixture({text:CONTRACT_REPLY});
  const cloud=createCloud({gemini,store:createStore({key:Buffer.alloc(32)}),tools:{}});
  await cloud.chat({text:'Hello'});
@@ -44,7 +44,8 @@ test('ordinary Phone chat and all six Office specialists use the upgraded defaul
   await cloud.chat({text:'Complete fixture task',bot:{id,name:id,role:'Fixture role',mode:'research',runId:`fixture-${id}`,model:'must-not-override'}});
  // Write and Analyse each add one independent-verifier request (medium reasoning).
  assert.equal(requests.length,9);
- assert.ok(requests.every(r=>r.url.endsWith('/models/gemini-3.8-flash:generateContent')));
+ assert.ok(requests[0].url.endsWith('/models/gemini-3.8-flash:generateContent'));
+ assert.ok(requests.slice(1).every(r=>r.url.endsWith('/models/gemini-4-hydrogen:generateContent')));
  // Chat stays responsive; specialists reason at the level their job needs.
  assert.deepEqual(requests.map(r=>r.body.generationConfig.thinkingConfig.thinkingLevel),['low','high','high','medium','medium','high','high','medium','medium']);
 });

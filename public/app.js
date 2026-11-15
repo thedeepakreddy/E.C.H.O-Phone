@@ -820,35 +820,95 @@
     return buf;
   }
 
-  voiceSession = new window.EchoVoice.Session({
+  // Two ways to talk. Live: one open line to Gemini Live, Echo answers in its
+  // own voice at once and can be interrupted. Turns: record, send, wait, read
+  // aloud; used when the relay has no live voice or the live line won't open.
+  const VOICE_LINES = {
+    turns: { off: "Tap Listen once. Keep the conversation going.", starting: "Opening microphone…", listening: "Listening · pause when you're ready to send", thinking: "Echo is thinking…", speaking: "Echo is speaking · listening resumes next" },
+    live: { off: "Tap Listen once. Keep the conversation going.", starting: "Connecting live voice…", listening: "Listening · just talk", thinking: "Echo is on it…", speaking: "Echo is speaking · talk to interrupt" },
+  };
+  let voiceEngine = null, liveUnavailable = false, liveThread = null, liveSpeaking = false;
+  const voiceState = (engine) => (state) => {
+    const active = state !== "off";
+    const line = VOICE_LINES[engine][state];
+    // Echo's own voice drives the same figure and captions that read-aloud speech does.
+    if (engine === "live" && (state === "speaking") !== liveSpeaking) { liveSpeaking = state === "speaking"; if (liveSpeaking) speechStart(); else speechEnd(state !== "off"); }
+    $("act-listen").setAttribute("aria-pressed", String(active));
+    $("listen-label").textContent = active ? "Pause" : "Listen";
+    $("chat-talk").setAttribute("aria-pressed", String(active));
+    $("chat-talk").setAttribute("aria-label", active ? "Stop voice conversation" : "Start voice conversation");
+    $("voice-home").textContent = line;
+    $("voice-home").hidden = !active;
+    $("voice-chat-status").textContent = line;
+    $("voice-chat").hidden = !active;
+    for (const id of ["humanoid-talk", "chat-humanoid-talk"]) {
+      $(id).setAttribute("aria-pressed", String(active));
+      $(id).setAttribute("aria-label", active ? "Pause voice conversation" : "Talk to Echo");
+    }
+    if (mode === "phone") paintPhoneHome();
+    window.echoCore?.avatar();
+  };
+  const voiceError = (e) => {
+    reportProblem("voice", e.name === "NotAllowedError" ? "microphone_denied" : "microphone_unavailable");
+    cloudAbort?.abort(); setCloudBusy(false); stopSpeaking();
+    toast(e.name === "NotAllowedError" ? "Allow microphone access in your browser settings, then tap Listen." : e.message || "Microphone unavailable. Tap Listen to try again.", true);
+  };
+  const turnVoice = new window.EchoVoice.Session({
     acquire: conversationMic,
     onTurn: (chunks, rate, current) => sendCloudVoice(toWav(chunks, rate, 16000), {
-      speak: true, current, onSpeak: () => { if (current()) voiceSession.phase("speaking"); },
+      speak: true, current, onSpeak: () => { if (current()) turnVoice.phase("speaking"); },
     }),
-    onState: (state) => {
-      const active = state !== "off";
-      const line = { off: "Tap Listen once. Keep the conversation going.", starting: "Opening microphone…", listening: "Listening · pause when you're ready to send", thinking: "Echo is thinking…", speaking: "Echo is speaking · listening resumes next" }[state];
-      $("act-listen").setAttribute("aria-pressed", String(active));
-      $("listen-label").textContent = active ? "Pause" : "Listen";
-      $("chat-talk").setAttribute("aria-pressed", String(active));
-      $("chat-talk").setAttribute("aria-label", active ? "Stop voice conversation" : "Start voice conversation");
-      $("voice-home").textContent = line;
-      $("voice-home").hidden = !active;
-      $("voice-chat-status").textContent = line;
-      $("voice-chat").hidden = !active;
-      for (const id of ["humanoid-talk", "chat-humanoid-talk"]) {
-        $(id).setAttribute("aria-pressed", String(active));
-        $(id).setAttribute("aria-label", active ? "Pause voice conversation" : "Talk to Echo");
-      }
-      if (mode === "phone") paintPhoneHome();
-      window.echoCore?.avatar();
+    onState: voiceState("turns"),
+    onError: voiceError,
+  });
+  /** One spoken exchange, saved to the conversation as text (the relay adds any buttons its tools made). */
+  async function saveLiveTurn(turn, threadId, account) {
+    if (DEV !== account) return;
+    const k = newKey();
+    putMessage({ k, at: Date.now(), from: "you", text: turn.user || "Voice message", kind: "voice", src: "phone", threadId });
+    let d = null;
+    try { d = await cloudApi("/cloud/live/turn", { threadId, requestId: k, user: turn.user, echo: turn.echo }); } catch { /* still shown on this phone below */ }
+    if (DEV !== account) return;
+    const reply = { k: `${k}-echo`, at: Date.now(), from: "echo", text: d?.reply ?? turn.echo, kind: "text", src: "phone", threadId,
+      actions: d?.actions || [], sources: d?.sources || [], saved: d?.saved || [], captures: d?.captures || [], references: d?.references || [] };
+    putMessage(reply);
+    prepareActions(reply);
+    lastCloudLine = reply.text;
+    experience?.afterReply();
+    const delegation = reply.actions.find((a) => a.type === "browse" && a.autoStart);
+    if (delegation) setTimeout(() => runEcho(delegation.data.task), 0);
+    syncToMac();
+  }
+  const liveVoice = window.EchoLive && new window.EchoLive.Session({
+    acquire: conversationMic,
+    begin: async () => {
+      await experience?.ensureThread();
+      liveThread = currentThread;
+      return cloudApi("/cloud/live/start", { threadId: liveThread, context: cloudContext() });
     },
+    tool: async (call) => (await cloudApi("/cloud/live/tool", { threadId: liveThread, name: call.name, args: call.args, callId: call.id, context: cloudContext() })).response,
+    onTurn: (turn) => saveLiveTurn(turn, liveThread, DEV),
+    // The last few words Echo said, like the captions of read-aloud speech.
+    onCaption: (said) => { caption.textContent = said; window.echoCore?.spell(said.split(/\s+/).slice(-4).join(" ")); },
+    onState: voiceState("live"),
     onError: (e) => {
-      reportProblem("voice", e.name === "NotAllowedError" ? "microphone_denied" : "microphone_unavailable");
-      cloudAbort?.abort(); setCloudBusy(false); stopSpeaking();
-      toast(e.name === "NotAllowedError" ? "Allow microphone access in your browser settings, then tap Listen." : e.message || "Microphone unavailable. Tap Listen to try again.", true);
+      if (!e.beforeReady || e.name === "NotAllowedError" || /microphone/i.test(e.message || "")) return voiceError(e);
+      // The live line never opened (no quota, blocked network, older relay): the next tap uses record-and-send voice.
+      liveUnavailable = true;
+      reportProblem("voice", "live_unavailable");
+      toast("Live voice isn't available right now. Tap Listen again for standard voice.", true);
     },
   });
+  const liveReady = () => !!liveVoice && !liveUnavailable && mode === "phone" && !!cloudInfo?.live && "WebSocket" in window;
+  voiceEngine = turnVoice;
+  voiceSession = {
+    get active() { return voiceEngine.active; },
+    get state() { return voiceEngine.state; },
+    get live() { return voiceEngine === liveVoice; },
+    phase: (state) => voiceEngine.phase(state),
+    stop: () => voiceEngine.stop(),
+    start() { voiceEngine = liveReady() ? liveVoice : turnVoice; return voiceEngine.start(); },
+  };
   function stopVoice() {
     ++macRecordingGeneration;
     const active = voiceSession.active;

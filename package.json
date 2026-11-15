@@ -21,7 +21,8 @@
     "test:ui:trackpad": "node scripts/trackpad-cancel-ui-test.mjs",
     "test:ui:markdown": "node scripts/markdown-ui-test.mjs",
     "test:ui:cloudrecovery": "node scripts/cloud-recovery-ui-test.mjs",
-    "test:ui:streaming": "node scripts/streaming-ui-test.mjs"
+    "test:ui:streaming": "node scripts/streaming-ui-test.mjs",
+    "test:ui:livevoice": "node scripts/live-voice-ui-test.mjs"
   },
   "dependencies": {
     "cheerio": "1.2.0",
