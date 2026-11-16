@@ -66,6 +66,8 @@
     close() { this.flush(); this.context.close?.().catch?.(() => {}); }
   }
 
+  /** Which step failed: "microphone", "token" (the relay or Google refused a session), "connect" (the line to Google) or "session". */
+  const at = (stage, error) => { const e = error instanceof Error ? error : new Error(String(error)); e.stage ??= stage; return e; };
   const readMessage = async (data) => JSON.parse(typeof data === "string" ? data : data instanceof ArrayBuffer ? new TextDecoder().decode(data) : await data.text());
 
   class Session {
@@ -92,21 +94,21 @@
       this.ready = false; this.reconnects = 0; this.heard = ""; this.said = ""; this.interrupted = false; this.turnOpen = false; this.expiring = false;
       this.phase("starting");
       try {
-        // Made inside the tap that started this, so the phone lets it play sound later.
+        // Everything the phone only allows from a tap starts here, before the first wait:
+        // the speaker, the microphone, and the request for a token.
         this.out = this.output();
         this.out.onIdle = () => { if (current() && this.state === "speaking" && !this.turnOpen) this.phase("listening"); };
-        await this.out.context?.resume?.();
-        // Microphone permission and the token are asked for together; whichever fails, the other is released.
-        const [mic, grant] = await Promise.allSettled([
-          this.acquire((samples) => { if (current()) this.frame(samples); }, (error) => { if (current()) this.fail(error); }),
-          this.begin(),
-        ]);
+        Promise.resolve(this.out.context?.resume?.()).catch(() => {});
+        const micAsked = this.acquire((samples) => { if (current()) this.frame(samples); }, (error) => { if (current()) this.fail(at("microphone", error)); });
+        const grantAsked = Promise.resolve().then(() => this.begin());
+        // Whichever fails, the other is released.
+        const [mic, grant] = await Promise.allSettled([micAsked, grantAsked]);
         if (mic.status === "fulfilled") { if (!current()) return void mic.value.close(); this.mic = mic.value; }
-        if (mic.status === "rejected") throw mic.reason;
-        if (grant.status === "rejected") throw grant.reason;
+        if (mic.status === "rejected") throw at("microphone", mic.reason);
+        if (grant.status === "rejected") throw at("token", grant.reason);
         if (!current()) return;
         this.down = new Downsampler(this.mic.rate);
-        await this.connect(grant.value, current);
+        await this.connect(grant.value, current).catch((error) => { throw at("connect", error); });
         if (!current()) return;
         this.ready = true;
         this.phase("listening");
@@ -120,12 +122,15 @@
         ws.binaryType = "arraybuffer";
         let settled = false;
         const refuse = (error) => { if (settled) return; settled = true; clearTimeout(timer); try { ws.close(); } catch { /* already closed */ } reject(error); };
-        const timer = setTimeout(() => refuse(new Error("Live voice took too long to connect.")), this.connectTimeoutMs);
+        const timer = setTimeout(() => refuse(new Error("Google didn't answer the voice line in time")), this.connectTimeoutMs);
         ws.onopen = () => ws.send(JSON.stringify({ setup: { model: `models/${grant.model}` } }));
-        ws.onerror = () => refuse(new Error("Couldn't connect to live voice."));
-        ws.onclose = () => {
-          if (!settled) return refuse(new Error("Live voice refused the connection."));
-          if (current() && this.ws === ws) this.dropped(current);
+        // A browser's socket error carries no detail; the close that follows usually does, so let it speak first.
+        ws.onerror = () => setTimeout(() => refuse(new Error("The voice line couldn't be opened")), 250);
+        // Google says why it closes a line in the close frame; without that, the reason is a guess.
+        ws.onclose = (event) => {
+          const why = String(event?.reason ?? "").replace(/\s+/g, " ").trim().slice(0, 160) || (event?.code ? `code ${event.code}` : "");
+          if (!settled) return refuse(new Error(`Google closed the voice line${why ? `: ${why}` : ""}`));
+          if (current() && this.ws === ws) this.dropped(current, why);
         };
         ws.onmessage = async (event) => {
           let message;
@@ -203,11 +208,11 @@
       } catch (error) { if (current()) this.fail(error); }
       finally { this.reconnecting = false; }
     }
-    dropped(current) {
+    dropped(current, why = "") {
       this.ws = null;
       // A session that had been working is resumed quietly, twice at most; one that never settled is an error.
       if (this.now() - this.openedAt > 20_000 && this.reconnects++ < 2) return void this.reconnect(current);
-      this.fail(new Error("Live voice disconnected. Tap Listen to continue."));
+      this.fail(at("session", new Error(`Live voice disconnected${why ? ` (${why})` : ""}. Tap Listen to continue.`)));
     }
 
     stop() {
@@ -225,7 +230,7 @@
     fail(error) {
       const beforeReady = !this.ready;
       this.stop();
-      this.onError?.(Object.assign(error instanceof Error ? error : new Error(String(error)), { beforeReady }));
+      this.onError?.(Object.assign(at(error?.stage ?? "session", error), { beforeReady }));
     }
   }
   globalThis.EchoLive = { Session, Downsampler, Player, toBase64, fromBase64, ENDPOINT };

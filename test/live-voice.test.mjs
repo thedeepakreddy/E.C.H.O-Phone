@@ -105,12 +105,33 @@ test("a line that never opens reports it; Google's goodbye is followed by a fres
   refused.net.sockets[0].close(); await p;
   assert.equal(refused.errors.length, 1);
   assert.equal(refused.errors[0].beforeReady, true, "the app falls back to record-and-send voice");
+  assert.equal(refused.errors[0].stage, "connect");
+
+  // Google's close frame says why; the phone shows it instead of a generic message.
+  const told = harness();
+  const pending = told.session.start(); await tick();
+  told.net.sockets[0].readyState = 3; told.net.sockets[0].onclose({ code: 1007, reason: "Request contains an invalid argument." }); await pending;
+  assert.match(told.errors[0].message, /Google closed the voice line: Request contains an invalid argument\./);
+
+  const noToken = harness({ begin: async () => { throw Object.assign(new Error("HTTP 502"), { data: { message: "Google didn't open a voice session: Unknown name" } }); } });
+  await noToken.session.start();
+  assert.equal(noToken.errors[0].stage, "token");
+  assert.ok(noToken.mic.closed, "a refused session releases the microphone");
+  assert.equal(noToken.net.sockets.length, 0);
   assert.ok(refused.mic.closed, "the microphone is released");
   assert.equal(refused.session.state, "off");
 
   const denied = harness({ acquire: async () => { throw Object.assign(new Error("denied"), { name: "NotAllowedError" }); } });
   await denied.session.start();
   assert.equal(denied.errors[0].name, "NotAllowedError");
+  assert.equal(denied.errors[0].stage, "microphone");
+
+  // The phone only lets a tap open the microphone: it is asked for before anything is awaited.
+  let askedInTap = false;
+  const tapped = harness({ acquire: async () => { askedInTap = true; return { rate: 48000, close() {} }; } });
+  const starting = tapped.session.start();
+  assert.equal(askedInTap, true);
+  tapped.session.stop(); await starting;
 
   const h = harness();
   const first = await h.ready();
@@ -166,6 +187,9 @@ test("a voice session carries Echo's instructions, the thread so far, and only v
   assert.deepEqual(setup.tools[1], { googleSearch: {} });
   await cloud.liveStart({ history: [], context: {} });
   await assert.rejects(cloud.liveStart({ history: [], context: {} }), (e) => e instanceof CloudError && e.kind === "cap");
+  const refusing = createCloud({ gemini: liveGemini({ liveToken: async () => { throw new GeminiError("other", "Invalid JSON payload received. Unknown name \"x\"."); } }), store: store(), now: () => NOW, tools: {} });
+  await assert.rejects(refusing.liveStart({ history: [] }), (e) => e.kind === "failed" && /Google didn't open a voice session: Invalid JSON payload received/.test(e.message));
+  assert.equal(await store().count("v:2026-10-06"), 0);
   const off = createCloud({ gemini: liveGemini({ liveModel: null }), store: store(), now: () => NOW, tools: {} });
   await assert.rejects(off.liveStart({ history: [] }), (e) => e.kind === "setup");
 });

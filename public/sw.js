@@ -3,7 +3,7 @@
  * its shell with no signal. Only these files: nothing from Echo (status, chat,
  * the screen) is ever cached — it is fetched live or not at all.
  */
-const CACHE = "echo-shell-v44";
+const CACHE = "echo-shell-v45";
 const SHELL = ["/markdown.js", "/markdown.css", "/vendor/markdown-it.min.js", "/vendor/purify.min.js", "/", "/app.css", "/app.js", "/bots.js", "/bots.css", "/agent-office.js", "/agent-office.css", "/agent-office-scene.js", "/office-assets/office.webp", "/office-assets/research.webp", "/office-assets/plan.webp", "/office-assets/write.webp", "/office-assets/review.webp", "/vendor/three.module.min.js", "/experience.js", "/voice-session.js", "/live-voice.js", "/speech-particles.js", "/humanoid-core.js", "/manifest.webmanifest", "/icons/icon-192.png", "/icons/apple-touch-icon.png", "/img/reactor.png", "/img/reactor-core.png", "/img/reactor-mid.png", "/img/reactor-outer.png", "/img/osiris.jpg"];
 SHELL.push('/agent-office-avatar.js','/agent-office-behavior.js','/agent-office-props.js','/agent-office-environment.js','/agent-office-navigation.js');
 

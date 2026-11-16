@@ -72,13 +72,13 @@
 
   // ---------- toast ----------
   let toastTimer = 0;
-  function toast(text, bad = false) {
+  function toast(text, bad = false, ms = 2600) {
     const t = $("toast");
     t.textContent = text;
     t.classList.toggle("bad", bad);
     t.classList.add("show");
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
+    toastTimer = setTimeout(() => t.classList.remove("show"), ms);
   }
 
   // ---------- link token and session ----------
@@ -892,11 +892,14 @@
     onCaption: (said) => { caption.textContent = said; window.echoCore?.spell(said.split(/\s+/).slice(-4).join(" ")); },
     onState: voiceState("live"),
     onError: (e) => {
-      if (!e.beforeReady || e.name === "NotAllowedError" || /microphone/i.test(e.message || "")) return voiceError(e);
-      // The live line never opened (no quota, blocked network, older relay): the next tap uses record-and-send voice.
+      if (!e.beforeReady) return voiceError(e);
+      if (e.name === "NotAllowedError") return voiceError(e);
+      // The live line never opened: say which step failed and why, and let the next tap use record-and-send voice.
       liveUnavailable = true;
-      reportProblem("voice", "live_unavailable");
-      toast("Live voice isn't available right now. Tap Listen again for standard voice.", true);
+      reportProblem("voice", e.stage === "token" ? "live_token" : e.stage === "microphone" ? "microphone_unavailable" : "live_connect");
+      const why = String(e.data?.message || e.message || "").replace(/\s+/g, " ").trim().replace(/[.!]+$/, "").slice(0, 180);
+      const step = { token: "no voice session", connect: "couldn't reach Google", microphone: "microphone" }[e.stage] || "it stopped";
+      toast(`Live voice didn't start (${step}${why ? `: ${why}` : ""}). Tap Listen again for standard voice.`, true, 12000);
     },
   });
   const liveReady = () => !!liveVoice && !liveUnavailable && mode === "phone" && !!cloudInfo?.live && "WebSocket" in window;
