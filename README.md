@@ -103,9 +103,7 @@ The link carries a private token. Treat it like a key, and don't post it anywher
 
 Replies to anything sent from the phone come back to the phone only. Echo doesn't say them out loud on the Mac.
 
-On Phone, tap Listen or either humanoid once to start a live voice conversation. The phone opens one line straight to Gemini Live (`gemini-3.8-live`): Echo hears you as you speak, answers in its own voice at once, and stops when you talk over it. The relay never carries the audio. It issues a 30-minute, single-use token that seals Echo's instructions, voice and tools into the session, runs the tools Echo asks for (reminders, Today, memory, weather, buttons) with the same checks as chat, and saves each spoken exchange to the conversation as text. Web search in a live session is Google's own. Sessions that Google ends are resumed between turns with what was said so far.
-
-If the relay has no live model, the line won't open, or the day's voice sessions are used up, Listen falls back to record-and-send voice: a 1.4-second speech pause sends each turn, Echo reads the reply, then listens again. Tap Pause/Stop to end it. Voice also stops when you leave Echo/Chat, hide the app, change accounts or modes, or the microphone is interrupted. The composer still supports hold-to-record voice notes. The Mac's recording protocol is unchanged.
+On Phone, tap Listen or either humanoid once to start a continuous voice conversation. A 1.4-second speech pause sends each turn, Echo reads the reply, then listens again. Tap Pause/Stop to end it. Voice also stops when you leave Echo/Chat, hide the app, change accounts or modes, or the microphone is interrupted. The composer still supports hold-to-record voice notes. The Mac's recording protocol is unchanged.
 
 Spoken replies stay in particle-word form throughout: short phrases are queued in the same voice, and speech start/end events advance their visuals. The last phrase briefly remains before the humanoid reforms. Stop cancels all remaining speech and releases its words immediately. Reduced motion displays static particle phrases; Chat retains the full written reply.
 
@@ -129,7 +127,6 @@ To set it up, add these to the service's **Environment** on Render:
 | --- | --- |
 | `GEMINI_API_KEY` | The cloud brain. Use a key from its own Google AI Studio project. Default: `gemini-3.8-flash`, with low thinking for interactive speed. Model access, pricing and quotas depend on your project. |
 | `GEMINI_AGENT_MODEL` | The model bots and Office specialists reason on. Default: `gemini-4-hydrogen` (free tier, its own quota), used only if the key offers it. When it is used up or busy, tasks start on `GEMINI_MODEL` until it recovers; a task already under way is never moved. `off` uses `GEMINI_MODEL`. |
-| `GEMINI_LIVE_MODEL`, `GEMINI_LIVE_VOICE` | Live voice. Default: `gemini-3.8-live` (free tier) speaking as `Charon`. `off` keeps record-and-send voice. `PHONE_DAILY_VOICE` caps sessions per day (default 60). |
 | `GEMINI_MODEL` | Optional explicit model override for Phone chat, and for agents when their own model is off or resting. Remove an old `gemini-3.1-flash-lite` override (or set `gemini-3.8-flash`) when deploying the upgrade. Blank values use the default. |
 | `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | Durable, encrypted storage on Upstash's free plan. Without them, the relay forgets everything when Render restarts. |
 | `QSTASH_TOKEN` | A wake-up every 5 minutes from Upstash QStash, so the relay stays awake and timed features can run. Also set `QSTASH_URL` if the Upstash console shows one. |
