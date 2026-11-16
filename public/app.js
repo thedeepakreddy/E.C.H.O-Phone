@@ -77,6 +77,8 @@
   /** Text with a small orb before it, for a status that is still in progress. */
   function orbLine(tag, cls, state, text) { const n = el(tag, `${cls} orb-line`); n.append(orb(state), el("span", "", text)); return n; }
   function toast(text, bad = false) {
+    // The limit banner already explains a used-up limit; one message, not two.
+    if (bad && /Your Gemini key/.test(text) && !$("limit-banner").hidden) return;
     const t = $("toast");
     t.textContent = text;
     t.classList.toggle("bad", bad);
@@ -150,7 +152,7 @@
     if (view === "home" && window.echoCore) window.echoCore.replay(); // the figure assembles every time
     if (view === "chat") { unread = 0; renderBadge(); setTimeout(scrollMessages, 30); pollChat(); window.echoCore?.avatar(); }
     if (view === "world") loadWorld(); else clearTimeout(worldTimer);
-    if (view === "settings") { loadPhoneCal(); renderMacPage(); }
+    if (view === "settings") { loadPhoneCal(); renderMacPage(); loadKey(); }
     if (view === "mac") renderMacPage();
     if (view === "browser") openBrowser();
     if (view === "screen") openScreen(); else closeScreen();
@@ -504,9 +506,51 @@
     if (changed && currentView === "missions") renderMissions(); // "Running" becomes "Last seen running", and back
   }
   const prettyModel = (m) => String(m || "").replace(/-preview.*$/, "").replace(/^gemini-/i, "Gemini ").replace(/-([a-z])/g, (_, c) => ` ${c.toUpperCase()}`).replace("Flash Lite", "Flash-Lite");
+  // ---------- Settings → Your Gemini key ----------
+  // The key goes to the server once, is checked with Google there, and never comes back: the phone only ever sees its last 4 characters.
+  let keyInfo = null;
+  function renderKey() {
+    const own = keyInfo?.ownKey;
+    $("key-state").textContent = !keyInfo ? "Checking…" : own ? (own.mode === "always" || !keyInfo.sharedKey ? `Your key ••••${own.last4}` : keyInfo.sharedOut ? `Your key ••••${own.last4} (Echo's limit is used up)` : `Echo's key, then yours ••••${own.last4}`) : keyInfo.sharedOut ? "Echo's key · used up for today" : "Echo's key";
+    $("key-label").textContent = own ? "Replace your key" : "Your own free Gemini API key";
+    $("key-mode").value = own?.mode || $("key-mode").value || "fallback";
+    $("key-remove").hidden = !own;
+  }
+  async function loadKey() {
+    if (!passValid()) return;
+    try { keyInfo = await cloudApi("/cloud/key"); } catch { keyInfo = keyInfo || null; }
+    renderKey();
+  }
+  $("key-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const input = $("key-input"), btn = $("key-save"), key = input.value.trim();
+    if (!key) return toast("Paste your key first.", true);
+    if (btn.getAttribute("aria-busy") === "true") return;
+    btn.setAttribute("aria-busy", "true"); btn.replaceChildren(orb("connecting", 20, "Checking your key"));
+    try {
+      const d = await cloudApi("/cloud/key", { action: "save", key, mode: $("key-mode").value });
+      input.value = "";
+      keyInfo = { ...(keyInfo || {}), ownKey: d.ownKey };
+      renderKey(); refreshCloud();
+      toast(`Saved. Google accepted your key ••••${d.ownKey.last4}.`);
+    } catch (err) { toast(err.data?.message || err.message || "Couldn't save that key.", true); }
+    finally { btn.removeAttribute("aria-busy"); btn.textContent = "Save"; }
+  });
+  $("key-mode").addEventListener("change", async () => {
+    if (!keyInfo?.ownKey) return; // remembered for when a key is saved
+    try { const d = await cloudApi("/cloud/key", { action: "mode", mode: $("key-mode").value }); keyInfo.ownKey = d.ownKey; renderKey(); toast(d.ownKey.mode === "always" ? "Echo will always use your key." : "Echo uses its own key first, then yours."); }
+    catch (err) { toast(err.data?.message || err.message, true); renderKey(); }
+  });
+  $("key-remove").addEventListener("click", async () => {
+    if (!confirm("Remove your Gemini key from Echo? Echo goes back to its own key only.")) return;
+    try { await cloudApi("/cloud/key", { action: "remove" }); keyInfo = { ...(keyInfo || {}), ownKey: null }; renderKey(); refreshCloud(); toast("Your key is removed."); }
+    catch (err) { toast(err.data?.message || err.message, true); }
+  });
   function cloudLine() {
     if (!cloudInfo) return "Checking…";
-    if (!cloudInfo.ready) return "Not set up yet: add the Gemini key on Render";
+    if (!cloudInfo.ready) return "Not set up yet: add the Gemini key on Render, or your own in Settings";
+    if (cloudInfo.ownKey && (cloudInfo.ownKey.mode === "always" || cloudInfo.sharedOut || !cloudInfo.sharedKey)) return `${prettyModel(cloudInfo.model)} · your key ••••${cloudInfo.ownKey.last4}`;
+    if (cloudInfo.sharedOut) return "Echo's free limit is used up · add your key in Settings below";
     const u = cloudInfo.usage;
     return u ? `${prettyModel(cloudInfo.model)} · ${u.requests}${u.limit ? ` of ${u.limit}` : ""} requests today` : prettyModel(cloudInfo.model);
   }
@@ -623,7 +667,7 @@
     });
     const d = await r.json().catch(() => ({}));
     if (r.status === 401) { PASS = ""; store.set("echo_pass", null); cloudInfo = null; showWelcome(); renderMode(); }
-    if (!r.ok) throw Object.assign(new Error(d.message || `HTTP ${r.status}`), { status: r.status, data: d });
+    if (!r.ok) { limitReached(d); throw Object.assign(new Error(d.message || `HTTP ${r.status}`), { status: r.status, data: d }); }
     return d;
   }
   /**
@@ -644,7 +688,7 @@
     if (!r.body || !String(r.headers.get("content-type") || "").includes("text/event-stream")) {
       const d = await r.json().catch(() => ({}));
       if (r.status === 401) { PASS = ""; store.set("echo_pass", null); cloudInfo = null; showWelcome(); renderMode(); }
-      if (!r.ok) throw Object.assign(new Error(d.message || `HTTP ${r.status}`), { status: r.status, data: d });
+      if (!r.ok) { limitReached(d); throw Object.assign(new Error(d.message || `HTTP ${r.status}`), { status: r.status, data: d }); }
       return d;
     }
     const reader = r.body.getReader(), decoder = new TextDecoder();
@@ -658,7 +702,7 @@
       if (!data) return;
       const d = JSON.parse(data);
       if (event === "done") result = d;
-      else if (event === "error") throw Object.assign(new Error(d.message || "Phone mode had a problem. Try again."), { status: d.status, data: d });
+      else if (event === "error") { limitReached(d); throw Object.assign(new Error(d.message || "Phone mode had a problem. Try again."), { status: d.status, data: d }); }
       else onEvent(event, d);
     };
     try {
@@ -674,6 +718,8 @@
     if (!result) throw Object.assign(new Error("The connection dropped."), { data: { message: "The connection dropped before Echo finished. Check Chat before sending again." } });
     return result;
   }
+  /** Echo's daily limit is used up and the user's own key would help: tell whatever shows the banner. */
+  function limitReached(d) { if (d?.ownKeyHelps) window.dispatchEvent(new CustomEvent("echo:limit", { detail: { resetsAt: d.resetsAt ?? null } })); }
   // Only categorical diagnostics leave the phone: never error text, URLs or conversation content.
   let diagnosticAt = 0;
   function reportProblem(feature, code) {
@@ -693,6 +739,9 @@
       await ensurePhoneSession();
       cloudInfo = await cloudApi("/cloud/status");
       if (!S) markMac(!!T && !!cloudInfo.macOnline);
+      // A background agent may have hit the limit: say so, unless the user chose "Later" or has a key.
+      if (cloudInfo.sharedOut && !cloudInfo.ownKey) showLimitBanner({ backAt: cloudInfo.sharedBackAt, fromFailure: false });
+      else if (!cloudInfo.sharedOut || cloudInfo.ownKey) $("limit-banner").hidden = true;
       briefInfo = await cloudApi("/cloud/briefing");
       renderBriefSettings();
       if (currentView === "missions") loadHandoffs();
@@ -700,6 +749,36 @@
     renderMode();
   }
   setInterval(() => { if (!document.hidden) refreshCloud(); }, 20_000);
+  // ---------- Echo's daily limit is used up ----------
+  // Wherever it happens (Chat, voice, Snap, Browser, agents), the user learns that
+  // Settings → Your Gemini key lets them carry on. "Later" hides it until Echo's
+  // limit comes back; another failed request shows it again.
+  const LIMIT_KEY = "echo_limit_later";
+  function openKeySettings() {
+    hideLimitBanner(false);
+    show("settings", { push: true });
+    setTimeout(() => {
+      $("key-list").scrollIntoView({ block: "center", behavior: "smooth" });
+      $("key-list").classList.add("attention");
+      $("key-input").focus({ preventScroll: true });
+      setTimeout(() => $("key-list").classList.remove("attention"), 2400);
+    }, 300);
+  }
+  function showLimitBanner({ backAt = null, fromFailure = true } = {}) {
+    if (cloudInfo?.ownKey) return; // they already have one
+    const later = Number(store.get(LIMIT_KEY)) || 0;
+    if (!fromFailure && later > Date.now()) return;
+    $("limit-text").replaceChildren("Add your own free Gemini key in ", el("b", "", "Settings → Your Gemini key"), ` to keep going now${backAt ? `, or wait until ${clock(backAt)} when Echo's limit comes back` : ""}.`);
+    $("limit-banner").hidden = false;
+  }
+  function hideLimitBanner(later = true) {
+    $("limit-banner").hidden = true;
+    if (later) store.set(LIMIT_KEY, String(cloudInfo?.sharedBackAt || Date.now() + 3 * 3600_000));
+  }
+  $("limit-add").addEventListener("click", openKeySettings);
+  $("limit-close").addEventListener("click", () => hideLimitBanner(true));
+  /** Every failed brain request reports a used-up limit as an event; the banner, wherever the user is, answers it. */
+  window.addEventListener("echo:limit", (event) => showLimitBanner({ backAt: event.detail?.resetsAt || null, fromFailure: true }));
   function cloudProblem(e) {
     if (e.status === 401) return "This phone session ended. Tap Get started to continue.";
     const d = e.data || {};
@@ -1029,6 +1108,13 @@
     if (m.cloudFailure) {
       n.dataset.cloudFailure = 'true';
       n.setAttribute('role', 'status');
+      // Echo's own key is used up for today: one tap to add yours.
+      if (m.ownKeyHelps) {
+        const acts = el('div', 'acts'), add = el('button', 'glass act-btn', 'Add my Gemini key');
+        add.type = 'button';
+        add.addEventListener('click', (event) => { event.stopPropagation(); openKeySettings(); });
+        acts.append(add); n.append(acts);
+      }
       if (m.retryable && cloudRetries.has(m.k)) {
         const acts = el('div', 'acts');
         const retry = el('button', 'glass act-btn', 'Retry');
@@ -1341,7 +1427,7 @@
         }
         const previous = chatCache.find(m => m.k === failureKey);
         if (previous) dropMessage(previous);
-        putMessage({ k: failureKey, at: Date.now(), from: 'echo', text, kind: 'text', src: 'phone', threadId: request.threadId, cloudFailure: true, retryable });
+        putMessage({ k: failureKey, at: Date.now(), from: 'echo', text, kind: 'text', src: 'phone', threadId: request.threadId, cloudFailure: true, retryable, ownKeyHelps: e.data?.ownKeyHelps === true });
         toast(text, true);
       } else if (e.name === 'AbortError' && startingFailure && DEV === requestAccount) {
         startingFailure.text = 'Retry was stopped. Check Chat and Today before sending again; work may have started.';

@@ -12,6 +12,7 @@ export const UI_TESTS={
  'test:ui:cloudrecovery':'scripts/cloud-recovery-ui-test.mjs',
  'test:ui:streaming':'scripts/streaming-ui-test.mjs',
  'test:ui:orbs':'scripts/orbs-ui-test.mjs',
+ 'test:ui:ownkey':'scripts/own-key-ui-test.mjs',
 };
 export const selectUI=(scripts,filters=[])=>Object.keys(UI_TESTS).filter(name=>scripts[name]===`node ${UI_TESTS[name]}`&&(!filters.length||filters.some(filter=>name.includes(filter))));
 export function validateUI(scripts){

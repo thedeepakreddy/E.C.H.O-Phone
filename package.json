@@ -22,7 +22,8 @@
     "test:ui:markdown": "node scripts/markdown-ui-test.mjs",
     "test:ui:cloudrecovery": "node scripts/cloud-recovery-ui-test.mjs",
     "test:ui:streaming": "node scripts/streaming-ui-test.mjs",
-    "test:ui:orbs": "node scripts/orbs-ui-test.mjs"
+    "test:ui:orbs": "node scripts/orbs-ui-test.mjs",
+    "test:ui:ownkey": "node scripts/own-key-ui-test.mjs"
   },
   "dependencies": {
     "cheerio": "1.2.0",
