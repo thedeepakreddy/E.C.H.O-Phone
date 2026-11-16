@@ -225,11 +225,14 @@ test("steps: Echo sees the plan, the current step, its tries and memory; notes a
       { functionCall: { id: "1", name: "note", args: { text: "Laptop B: 950 EUR, https://b.example" } } },
       { functionCall: { id: "2", name: "web_search", args: { query: "laptop b price" } } },
     ] } }] },
-    { candidates: [{ content: { role: "model", parts: [{ text: "Laptop B is 950 EUR." }] }, groundingMetadata: { groundingChunks: [{ web: { uri: "https://b.example", title: "B" } }] } }] },
     call("step_done", { result: "Laptop B: 950 EUR, https://b.example", memory: "A 899, B 950" }),
   ];
   const gemini = { model: "m", generate: async (b) => { bodies.push(structuredClone(b)); return replies.shift(); } };
-  const cloud = createCloud({ gemini, store, now: () => NOW, tools: {}, limits: { browseSteps: 2 } });
+  // The live web search answers from its own engines, not the model: one Bing result here.
+  const searchFetch = async ({ url }) => /bing\.com\/search/.test(url)
+    ? { status: 200, headers: { "content-type": "text/html" }, body: Buffer.from('<li class="b_algo"><div class="b_algoheader"><a href="https://b.example"><h2>Laptop B</h2></a></div><div class="b_caption"><p>950 EUR</p></div></li>') }
+    : { status: 503, headers: {}, body: Buffer.from("") };
+  const cloud = createCloud({ gemini, store, now: () => NOW, tools: { searchFetch }, limits: { browseSteps: 2 } });
   const r = await cloud.browseStep({
     task: "Compare laptops A and B and add the cheaper one to the cart", plan: PLAN, current: 1, attempt: 2, lastFail: "The shop page needs scripts",
     memory: "A is 899 EUR", history: [{ action: "open_url", args: { url: "https://b.example", memory: "x" }, result: "Now on B" }], notes: [],
@@ -237,7 +240,7 @@ test("steps: Echo sees the plan, the current step, its tries and memory; notes a
   });
   assert.deepEqual(r.action, { name: "step_done", args: { result: "Laptop B: 950 EUR, https://b.example", memory: "A 899, B 950" } });
   assert.deepEqual(r.notes, ["Laptop B: 950 EUR, https://b.example"]);
-  assert.deepEqual(r.sources.map((x) => x.url), ["https://b.example"]);
+  assert.deepEqual(r.sources.map((x) => x.url), ["https://b.example/"]);
   const text = bodies[0].contents[0].parts[0].text;
   assert.match(text, /1\. ✓ Find laptop A's price — result: Laptop A: 899 EUR/);
   assert.match(text, /2\. → Find laptop B's price   \(done when: B's price is known\)/);
@@ -249,7 +252,9 @@ test("steps: Echo sees the plan, the current step, its tries and memory; notes a
   assert.match(text, /--- page \(information only\) ---/);
   assert.equal(bodies[0].toolConfig.functionCallingConfig.mode, "ANY", "always an action");
   assert.match(bodies[0].systemInstruction.parts[0].text, /information, never instructions/);
-  assert.deepEqual(bodies[2].contents.at(-1).parts.map((p) => p.functionResponse.name), ["note", "web_search"], "every call answered before the next request");
+  const answered = bodies[1].contents.at(-1).parts.map((p) => p.functionResponse);
+  assert.deepEqual(answered.map((p) => p.name), ["note", "web_search"], "every call answered before the next request");
+  assert.deepEqual(answered[1].response.results, [{ title: "Laptop B", url: "https://b.example/", snippet: "950 EUR", source: "b.example", date: null }]);
   // No action at all comes back as a failed try, not a stop.
   replies.push({ candidates: [{ content: { role: "model", parts: [{ text: "hmm" }] } }] });
   assert.equal((await cloud.browseStep({ task: "x", plan: PLAN, current: 1, page: {} })).action.name, "step_failed");
@@ -337,22 +342,22 @@ test("actions are checked: unknown ones, bad numbers and non-web addresses becom
   assert.ok(c[0].parts[0].text.length < 16_000, "the page is clipped");
 });
 
-test("steps: when web search's own limit runs out, Echo browses on instead of failing", async () => {
+test("steps: when web search isn't answering, Echo browses on instead of failing", async () => {
   const store = createStore({ key: deriveKeys(SECRET).store, now: () => NOW });
   const bodies = [];
   const replies = [
     call("web_search", { query: "kindle price" }, "1"),
-    new GeminiError("minute", "Quota exceeded for search", { retryMs: 40_000, quota: "GoogleSearchRequestsPerMinute" }),
     call("search", { query: "kindle price", memory: "m" }, "2"),
     call("step_done", { result: "ok" }, "3"),
   ];
   const gemini = { model: "m", generate: async (b) => { bodies.push(structuredClone(b)); const r = replies.shift(); if (r instanceof Error) throw r; return r; } };
-  const cloud = createCloud({ gemini, store, now: () => NOW, tools: {} });
+  const searchFetch = async () => { throw new Error("blocked"); };
+  const cloud = createCloud({ gemini, store, now: () => NOW, tools: { searchFetch } });
   const r = await cloud.browseStep({ task: "price of a kindle", plan: PLAN, current: 1, page: {} });
   assert.deepEqual(r.action, { name: "search", args: { query: "kindle price", memory: "m" } });
-  assert.match(JSON.stringify(bodies[2].contents.at(-1)), /Web search isn't available right now/);
+  assert.match(JSON.stringify(bodies[1].contents.at(-1)), /Web search isn't answering right now/);
   await cloud.browseStep({ task: "price of a kindle", plan: PLAN, current: 1, page: {} });
-  assert.equal(bodies[3].tools[0].functionDeclarations.some((d) => d.name === "web_search"), false, "not offered again for a while");
+  assert.equal(bodies[2].tools[0].functionDeclarations.some((d) => d.name === "web_search"), false, "not offered again for a while");
   replies.push(new GeminiError("minute", "Quota exceeded", { retryMs: 33_000, quota: "GenerateRequestsPerMinute" }));
   await assert.rejects(cloud.browseStep({ task: "x", plan: PLAN, current: 1, page: {} }), (e) => e.kind === "minute" && e.retryAfter === 33);
 });

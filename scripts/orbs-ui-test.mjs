@@ -13,8 +13,7 @@ const rounds = [{ calls: [['web_search', { query: 'Paris weather' }]] }, { text:
 const data = (r) => ({ candidates: [{ content: { role: 'model', parts: [...(r.text ? [{ text: r.text }] : []), ...(r.calls ?? []).map(([name, args]) => ({ functionCall: { name, args } }))] } }] });
 const gemini = {
   model: 'fixture', embed: async () => Array(512).fill(0),
-  // The web search takes a moment, so the searching orb is on screen long enough to see.
-  generate: async (body) => body.tools?.some((t) => t.google_search) ? new Promise((ok) => setTimeout(() => ok(data({ text: '14 degrees, rain.' })), 1500)) : data(rounds.shift() ?? { text: 'ok' }),
+  generate: async () => data(rounds.shift() ?? { text: 'ok' }),
   generateStream: async (body, { onText }) => {
     const r = rounds.shift();
     if (r.calls) { await new Promise((ok) => setTimeout(ok, 600)); return data(r); }
@@ -23,7 +22,8 @@ const gemini = {
     return data(r);
   },
 };
-const relay = createRelay({ secret: 'private-orbs-fixture-'.repeat(4), gemini, fetchJson: async () => ({}) });
+// Echo's own web search reaches no real site in this test: a Bing page that takes a moment.
+const relay = createRelay({ secret: 'private-orbs-fixture-'.repeat(4), gemini, fetchJson: async () => ({}), searchFetch: async () => { await new Promise((ok) => setTimeout(ok, 1500)); return { status: 200, headers: { 'content-type': 'text/html' }, body: Buffer.from('<li class="b_algo"><div class="b_algoheader"><a href="https://weather.example/paris"><h2>Paris weather</h2></a></div></li>') }; } });
 const server = http.createServer(relay.handler);
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const base = `http://127.0.0.1:${server.address().port}`;
@@ -66,7 +66,7 @@ try {
   await page.locator('#chat-input').press('Enter');
   await page.waitForFunction(() => document.querySelector('#typing echo-orb')?.getAttribute('state') === 'breathing');
   await page.waitForFunction(() => document.querySelector('.msg.live echo-orb')?.getAttribute('state') === 'searching');
-  assert.match(await page.locator('.msg.live').textContent(), /Searching the web/);
+  assert.match(await page.locator('.msg.live').textContent(), /Searching the live web for “Paris weather”/);
   assert.equal(await page.locator('#typing').isVisible(), false, 'one orb at a time');
   if (shots) await page.screenshot({ path: `${shots}/orbs-chat-searching.png` });
   await page.waitForFunction(() => document.querySelector('.msg.live echo-orb')?.getAttribute('state') === 'composing');
