@@ -1100,7 +1100,7 @@
   // Echo's answer while it is still being written: one bubble, repainted at
   // most once a frame, replaced by the saved message when the reply is done.
   const TOOL_STATUS = {
-    web_search: "Searching the web…", search_research: "Searching research papers…", read_web_page: "Reading the page…", image_search: "Finding pictures…",
+    web_search: "Searching the live web…", search_research: "Searching research papers…", read_web_page: "Reading the page…", image_search: "Finding pictures…",
     get_weather: "Checking the weather…", world_events: "Checking world events…", recall_memory: "Looking through what you saved…", get_today: "Checking Today…",
     save_memory: "Saving…", remind_me: "Saving to Today…", capture_commitment: "Saving to Today…", update_commitment: "Updating Today…", run_bot: "Handing it to a bot…",
   };
@@ -1108,6 +1108,14 @@
   const TOOL_ORB = { web_search: "searching", search_research: "searching", read_web_page: "searching", image_search: "searching", recall_memory: "searching",
     get_weather: "connecting", world_events: "connecting", get_today: "connecting",
     save_memory: "weaving", remind_me: "weaving", capture_commitment: "weaving", update_commitment: "weaving", run_bot: "working" };
+  /** "Searching the live web for “iPhone 18 news”…", "Reading macrumors.com…": the words or site only, never page text. */
+  function toolLine(d) {
+    const detail = typeof d.detail === "string" ? d.detail.slice(0, 60) : "";
+    if (!detail) return TOOL_STATUS[d.name];
+    if (d.name === "read_web_page") return `Reading ${detail}…`;
+    if (d.name === "get_weather") return `Checking the weather in ${detail}…`;
+    return `${TOOL_STATUS[d.name].replace(/…$/, "")} for “${detail}”…`;
+  }
   let live = null;
   function paintLive() {
     if (!live) return;
@@ -1124,7 +1132,7 @@
   }
   function liveEvent(event, d, threadId) {
     if (event === "delta") { live ??= { text: "", status: "", threadId }; live.text += d.text; }
-    else if (event === "tool") { if (!TOOL_STATUS[d.name]) return; live ??= { text: "", status: "", threadId }; live.status = TOOL_STATUS[d.name]; live.orb = TOOL_ORB[d.name]; live.text = ""; }
+    else if (event === "tool") { if (!TOOL_STATUS[d.name]) return; live ??= { text: "", status: "", threadId }; live.status = toolLine(d); live.orb = TOOL_ORB[d.name]; live.text = ""; }
     else if (event === "reset") { if (!live) return; live.text = ""; if (!live.status) return endLive(); }
     else return;
     if (live.threadId !== currentThread) return;
@@ -1279,7 +1287,8 @@
       cancel = () => reject(abort.signal.reason);
       abort.signal.addEventListener('abort', cancel, { once: true });
     });
-    const timer = setTimeout(() => { timedOut = true; abort.abort(new DOMException('Echo took too long to respond.', 'TimeoutError')); }, 45_000);
+    // Live searching and reading pages takes longer than an answer from memory.
+    const timer = setTimeout(() => { timedOut = true; abort.abort(new DOMException('Echo took too long to respond.', 'TimeoutError')); }, 60_000);
     setCloudBusy(true);
     try {
       const ask = path === "/cloud/chat"

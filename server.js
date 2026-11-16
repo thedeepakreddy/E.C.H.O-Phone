@@ -155,6 +155,8 @@ export function createRelay({
   gemini = null, store = null, limits = {},
   publicUrl = "https://echo-phone.onrender.com", pushFetch = fetch, pushAnyHost = false, browseAnyHost = false,
   adminPassword = "", deployment = {},
+  /** Tests only: where Echo's own web search fetches its result pages (lib/web-search.mjs). */
+  searchFetch = undefined,
 } = {}) {
   if (!secret || secret.length < 32) throw new Error("RELAY_SECRET must be set (at least 32 characters).");
   const secretBuf = Buffer.from(secret);
@@ -439,6 +441,7 @@ export function createRelay({
   const cloud = gemini ? createCloud({
     gemini, store, now, limits,
     tools: {
+      ...(searchFetch ? { searchFetch } : {}),
       weather: getWeather,
       world: async () => { const { raw, ...w } = await getWorld(); return w; },
       geocode: async (q) => ((await fetchJson(`https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=${encodeURIComponent(q)}`))?.results ?? [])
@@ -1160,7 +1163,7 @@ export function createRelay({
       if (rateLimited(claims.device)) return send(res, 429, { error: "busy", message: "Slow down a little — too many messages this minute." });
       const turn = new AbortController();
       const ensure = async () => turn.signal.throwIfAborted();
-      const timer = setTimeout(() => turn.abort(new CloudError('unavailable', "Echo took too long to respond. Check Chat and Today before sending this request again.", { retryable: false })), 30_000);
+      const timer = setTimeout(() => turn.abort(new CloudError('unavailable', "Echo took too long to respond. Check Chat and Today before sending this request again.", { retryable: false })), 50_000);
       const disconnected = () => { if (!res.writableEnded) turn.abort(new DOMException('The phone disconnected.', 'AbortError')); };
       res.once('close', disconnected);
       // A phone that asks for it gets the answer as it is written (server-sent
@@ -1199,7 +1202,7 @@ export function createRelay({
           try {
             r = await cloud.chat({ history, text: path === "/cloud/chat" ? body.text : undefined, audio: path === "/cloud/voice" ? body.audio : undefined,
               context: { ...context, threadId }, memory: mem, signal: turn.signal, ensure,
-              ...(live ? { onStream: (event) => emit(event.type, event.type === "delta" ? { text: event.text } : event.type === "tool" ? { name: event.name } : {}) } : {}) });
+              ...(live ? { onStream: (event) => emit(event.type, event.type === "delta" ? { text: event.text } : event.type === "tool" ? { name: event.name, ...(event.detail ? { detail: event.detail } : {}) } : {}) } : {}) });
           } catch (error) {
             if (t && error instanceof CloudError && error.retryable === true) error.retryVersion = retryVersion;
             throw error;
