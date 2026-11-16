@@ -295,12 +295,13 @@ try {
     assert.equal(imported.some(message => message.ref.endsWith('-failure')), false);
   });
 
-  await test(`${engine}: a 45-second timeout stops typing and leaves an uncertain failure without Retry`, async t => {
+  // 60 seconds since Echo searches and reads live web pages within a turn (the relay allows 50).
+  await test(`${engine}: a 60-second timeout stops typing and leaves an uncertain failure without Retry`, async t => {
     const f = await fixture(t);
     await f.page.clock.pauseAt(new Date('2026-10-15T12:01:00Z'));
     await f.send(); // Leave the transport unresolved to exercise the actual abort timer.
-    await f.page.clock.runFor(44_999);
-    assert.equal(await f.page.locator('#typing').count(), 1, 'The deadline has not expired before 45 seconds');
+    await f.page.clock.runFor(59_999);
+    assert.equal(await f.page.locator('#typing').count(), 1, 'The deadline has not expired before 60 seconds');
     assert.equal(await f.page.locator('#messages [data-cloud-failure]').count(), 0);
     await f.page.clock.runFor(1); await f.settled();
     const failure = f.page.locator('#messages [data-cloud-failure]');

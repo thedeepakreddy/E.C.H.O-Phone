@@ -561,6 +561,10 @@
 </section>
 
 <div class="toast glass" id="toast" role="status" aria-live="polite"></div>
+<div class="limit-banner glass" id="limit-banner" role="alert" hidden>
+  <div class="grow"><b>Echo's free daily limit is used up</b><span class="sub small" id="limit-text">Add your own free Gemini key in <b>Settings → Your Gemini key</b> to keep going now.</span></div>
+  <div class="limit-acts"><button class="cta small-pill" id="limit-add" type="button">Add my key</button><button class="glass small-pill" id="limit-close" type="button" aria-label="Dismiss">Later</button></div>
+</div>
 <script src="/vendor/markdown-it.min.js" defer></script>
 <script src="/vendor/purify.min.js" defer></script>
 <script src="/markdown.js" defer></script>

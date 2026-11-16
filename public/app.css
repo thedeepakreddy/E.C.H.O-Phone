@@ -294,7 +294,15 @@ echo-orb { display: inline-block; flex: none; line-height: 0; vertical-align: mi
 echo-orb[hidden] { display: none; }
 echo-orb canvas { display: block; }
 .orb-line { display: flex; align-items: center; gap: 8px; }
+/* Echo's daily limit is used up: a banner that points to Settings → Your Gemini key. */
+.limit-banner { background: rgba(9, 16, 24, .94); box-shadow: 0 10px 30px rgba(0, 0, 0, .45); position: fixed; z-index: 59; left: 12px; right: 12px; top: calc(var(--safe-top) + 8px); border-radius: 22px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; max-width: 520px; margin: 0 auto; }
+.limit-banner[hidden] { display: none; }
+.limit-banner b { display: block; font-size: 15px; }
+.limit-banner .sub { display: block; margin-top: 3px; line-height: 1.35; }
+.limit-banner .sub b { display: inline; font-size: inherit; }
+.limit-acts { display: flex; gap: 8px; justify-content: flex-end; }
 /* Settings → Your Gemini key */
+#key-list.attention { box-shadow: 0 0 0 2px var(--cyan); transition: box-shadow .3s; }
 .key-row { display: flex; gap: 8px; align-items: center; width: 100%; }
 .key-row .row-input { flex: 1; min-width: 0; }
 #key-save[aria-busy="true"] { opacity: .6; }

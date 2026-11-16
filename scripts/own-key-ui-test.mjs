@@ -31,8 +31,28 @@ try {
   await page.locator('#chat-input').press('Enter');
   const add = page.locator('[data-cloud-failure] button', { hasText: 'Add my Gemini key' });
   await add.waitFor();
-  assert.match(await page.locator('[data-cloud-failure]').textContent(), /Add your own free Gemini key in Settings/);
+  assert.match(await page.locator('[data-cloud-failure]').textContent(), /Add your own free Gemini key in Settings → Your Gemini key/);
+  // The banner says the same wherever the limit hits, and names the Settings section.
+  await page.locator('#limit-banner').waitFor();
+  assert.match(await page.locator('#limit-banner').textContent(), /Echo's free daily limit is used up.*Settings → Your Gemini key/s);
   if (shots) await page.screenshot({ path: `${shots}/key-chat-limit.png` });
+  // "Later" hides it, and a passive status check doesn't bring it back; the next failed request does.
+  await page.locator('#limit-close').click();
+  assert.equal(await page.locator('#limit-banner').isVisible(), false);
+  await page.reload();
+  await page.locator('[data-tab="today"]').click();
+  await page.waitForTimeout(1500);
+  assert.equal(await page.locator('#limit-banner').isVisible(), false, 'Later is remembered');
+  await page.evaluate(() => localStorage.removeItem('echo_limit_later'));
+  await page.reload();
+  await page.locator('#limit-banner').waitFor({ timeout: 25000 });
+  // Opened on another page (Today), with nothing sent: the relay's status says Echo's limit is out.
+  await page.locator('#limit-add').click();
+  await page.waitForFunction(() => document.activeElement?.id === 'key-input' && document.querySelector('#key-list').classList.contains('attention'));
+  assert.equal(await page.locator('#limit-banner').isVisible(), false);
+  await page.locator('[data-back]:visible').first().click();
+  await page.locator('[data-tab="chat"]').click();
+  await add.waitFor();
   await add.click();
   await page.waitForFunction(() => document.activeElement?.id === 'key-input');
   // A wrong key is refused; the right one is saved and shown only as its last 4.
@@ -42,6 +62,7 @@ try {
   await page.locator('#key-input').fill(GOOD);
   await page.locator('#key-save').click();
   await page.waitForFunction(() => /••••WXYZ/.test(document.querySelector('#key-state')?.textContent ?? ''));
+  assert.equal(await page.locator('#limit-banner').isVisible(), false, 'no banner once the user has a key');
   assert.equal(await page.locator('#key-input').inputValue(), '', 'the field is cleared once saved');
   assert.equal(await page.locator('#key-input').getAttribute('type'), 'password');
   assert.equal(await page.locator('#key-remove').isVisible(), true);
@@ -57,5 +78,5 @@ try {
   await page.locator('#chat-input').press('Enter');
   await page.waitForFunction(() => [...document.querySelectorAll('.msg.echo')].some((m) => /Answered with your own key/.test(m.textContent)));
   assert.deepEqual(errors, []);
-  console.log('PASS chromium: used-up limit offers "Add my Gemini key"; a wrong key is refused, the right one is saved as ••••WXYZ (never in the page) and Chat answers with it.');
+  console.log('PASS chromium: used-up limit shows a banner naming Settings → Your Gemini key (also on other pages, Later remembered) and offers "Add my Gemini key"; a wrong key is refused, the right one is saved as ••••WXYZ (never in the page) and Chat answers with it.');
 } finally { await browser.close(); server.closeAllConnections(); server.close(); }

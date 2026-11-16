@@ -499,7 +499,7 @@ export function createRelay({
     catch (e) {
       if (!outOfShared(e)) throw e;
       if (e.kind === "quota") sharedOutUntil = e.resetsAt ?? 0;
-      if (!own) { e.message = `${e.message} Add your own free Gemini key in Settings to keep going.`; e.ownKeyHelps = true; throw e; }
+      if (!own) { e.message = `${e.message} Add your own free Gemini key in Settings → Your Gemini key to keep going.`; e.ownKeyHelps = true; throw e; }
       return mine();
     }
   }
@@ -813,7 +813,7 @@ export function createRelay({
       return send(res, 200, {
         ready: Boolean(cloud) || Boolean(own), model: gemini?.model ?? null, store: store.remote ? "upstash" : "memory",
         macOnline, usage: cloud ? await cloud.usage().catch(() => null) : null, passExpires: claims.exp,
-        ownKey: own ? { last4: own.last4, mode: own.mode } : null, sharedOut: now() < sharedOutUntil, sharedKey: Boolean(cloud),
+        ownKey: own ? { last4: own.last4, mode: own.mode } : null, sharedOut: now() < sharedOutUntil, sharedBackAt: now() < sharedOutUntil ? sharedOutUntil : null, sharedKey: Boolean(cloud),
         // Agents may reason on a stronger model than chat.
         agentModel: cloud ? cloud.agentModel() : null,
       });

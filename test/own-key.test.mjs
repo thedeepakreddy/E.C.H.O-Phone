@@ -76,7 +76,7 @@ test("when Echo's key runs out, the user's key answers, and keeps answering unti
     const stuck = await other.post("/cloud/chat", { text: "Hello", context: {} });
     assert.equal(stuck.status, 429);
     assert.equal(stuck.body.ownKeyHelps, true);
-    assert.match(stuck.body.message, /Add your own free Gemini key in Settings/);
+    assert.match(stuck.body.message, /Add your own free Gemini key in Settings → Your Gemini key/);
   } finally { r.close(); }
 });
 
