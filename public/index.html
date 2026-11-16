@@ -295,6 +295,15 @@
       <div class="row col-row"><label for="set-shortcuts" class="small">Shortcuts Echo may run</label>
         <input id="set-shortcuts" class="row-input" placeholder="Names, separated by commas" autocomplete="off" autocapitalize="words" enterkeyhint="done"></div>
     </div>
+    <p class="group-title">Your Gemini key</p>
+    <div class="glass list" id="key-list">
+      <div class="row col-row"><span class="small">Echo answers with</span><span class="sub" id="key-state" role="status">Echo's key</span></div>
+      <form class="row col-row" id="key-form" autocomplete="off"><label for="key-input" class="small" id="key-label">Your own free Gemini API key</label>
+        <div class="key-row"><input id="key-input" class="row-input" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Paste your key" enterkeyhint="done"><button class="glass small-pill" type="submit" id="key-save">Save</button></div></form>
+      <div class="row"><label for="key-mode" class="grow">Use my key</label><select id="key-mode" class="row-select"><option value="fallback">When Echo's limit runs out</option><option value="always">Always</option></select></div>
+      <button class="row danger-row" id="key-remove" hidden>Remove my key</button>
+    </div>
+    <p class="sub tiny note-line">Echo uses its own key first. Add yours to keep going when Echo's free daily limit is used up. Get a free key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">aistudio.google.com/apikey</a>. Google checks it before it is saved; it is stored encrypted on Echo's server, only used for your requests, and never shown again or sent back to this phone.</p>
     <p class="group-title">Morning briefing</p>
     <div class="glass list">
       <button class="row" role="switch" aria-checked="false" id="sw-brief"><span class="grow">Briefing and reminders</span><span class="track"><span class="knob"></span></span></button>

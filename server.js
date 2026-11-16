@@ -45,7 +45,7 @@ import { createStore } from "./lib/store.js";
 import { createAdmin } from "./lib/admin.js";
 import { MAC_ROUTES } from "./lib/mac-routes.js";
 import { metWeather, invalidWeather } from "./lib/weather.js";
-import { createGemini, pickBrowseModels, pickFallbackModels } from "./lib/gemini.js";
+import { createGemini, pickBrowseModels, pickFallbackModels, GeminiError } from "./lib/gemini.js";
 import { createCloud, CloudError } from "./lib/cloud.js";
 import { buildIcs, validEvent } from "./lib/calendar.js";
 import { ensureSchedule } from "./lib/tick.js";
@@ -157,6 +157,8 @@ export function createRelay({
   adminPassword = "", deployment = {},
   /** Tests only: where Echo's own web search fetches its result pages (lib/web-search.mjs). */
   searchFetch = undefined,
+  /** A Gemini client for a user's own key (tests pass a stand-in). */
+  makeGemini = (apiKey) => createGemini({ apiKey, ...(gemini?.model ? { model: gemini.model } : {}) }),
 } = {}) {
   if (!secret || secret.length < 32) throw new Error("RELAY_SECRET must be set (at least 32 characters).");
   const secretBuf = Buffer.from(secret);
@@ -263,8 +265,7 @@ export function createRelay({
       try{return await withKey(key,botState,fn,options);}finally{await store.releaseLease(lock,owner);}
     },
     execute:async({bot,goal,history,context,signal,ensure,onEvent,takeUpdates,onCheckpoint,checkpoint,appliedUpdates,resumeFallback,partialDraft})=>{
-      if(!cloud)throw new CloudError('setup','Bots need Phone mode’s configured brain.');
-      const mem=await memoryFor(context.device,context.tz);const result=await cloud.chat({text:goal,history,context,memory:mem,bot:{...bot,runId:context.requestId},signal,ensure,onEvent,takeUpdates,onCheckpoint,checkpoint,appliedUpdates,resumeFallback,partialDraft});withLinks(result.actions);return result;
+      const mem=await memoryFor(context.device,context.tz);const result=await withBrain(context.device,brain=>brain.chat({text:goal,history,context,memory:mem,bot:{...bot,runId:context.requestId},signal,ensure,onEvent,takeUpdates,onCheckpoint,checkpoint,appliedUpdates,resumeFallback,partialDraft}));withLinks(result.actions);return result;
     },
   });
   /** Memory as Echo's phone brain uses it: this phone's, found or saved by the tools in lib/cloud.js. */
@@ -438,16 +439,70 @@ export function createRelay({
     weatherLoading.set(key, load);
     return load;
   }
-  const cloud = gemini ? createCloud({
-    gemini, store, now, limits,
-    tools: {
-      ...(searchFetch ? { searchFetch } : {}),
-      weather: getWeather,
-      world: async () => { const { raw, ...w } = await getWorld(); return w; },
-      geocode: async (q) => ((await fetchJson(`https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=${encodeURIComponent(q)}`))?.results ?? [])
-        .map((r) => ({ name: r.name, country: r.country ?? "", lat: r.latitude, lon: r.longitude })),
-    },
-  }) : null;
+  const cloudTools = {
+    ...(searchFetch ? { searchFetch } : {}),
+    weather: getWeather,
+    world: async () => { const { raw, ...w } = await getWorld(); return w; },
+    geocode: async (q) => ((await fetchJson(`https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=${encodeURIComponent(q)}`))?.results ?? [])
+      .map((r) => ({ name: r.name, country: r.country ?? "", lat: r.latitude, lon: r.longitude })),
+  };
+  const cloud = gemini ? createCloud({ gemini, store, now, limits, tools: cloudTools }) : null;
+
+  // ---- A user's own Gemini key ---------------------------------------------------
+  // Echo answers on the owner's key (GEMINI_API_KEY). A user may add their own
+  // free key in Settings, used when the owner's daily limit runs out, or always.
+  // The key is sealed in the store with the rest of the account (lib/store.js),
+  // never sent back to any phone or written to a log; only its last 4 characters
+  // are shown. Its usage is counted apart from the owner's.
+  const userKeys = new Map();
+  const keyRecord = (device) => store.get(`ukey:${device}`).catch(() => null);
+  /** A brain on this user's key, made once per key and kept for a while. */
+  async function ownBrain(device) {
+    const rec = await keyRecord(device);
+    if (!rec?.key) return null;
+    const cached = userKeys.get(device);
+    if (cached?.key === rec.key) return { cloud: cached.cloud, mode: rec.mode };
+    const own = makeGemini(rec.key);
+    if (gemini?.fallbackModels) own.fallbackModels = gemini.fallbackModels;
+    if (gemini && "agentModel" in gemini) own.agentModel = gemini.agentModel;
+    const prefix = `uk:${createHash("sha256").update(device).digest("hex").slice(0, 16)}:`;
+    const counted = { count: (k) => store.count(prefix + k), incr: (k, t) => store.incr(prefix + k, t), setCount: (k, n, t) => store.setCount(prefix + k, n, t) };
+    const entry = { key: rec.key, cloud: createCloud({ gemini: own, store: counted, now, limits: { messages: 1000, snaps: 200, browseSteps: 1500 }, tools: cloudTools }) };
+    userKeys.delete(device); userKeys.set(device, entry);
+    if (userKeys.size > 100) userKeys.delete(userKeys.keys().next().value);
+    return { cloud: entry.cloud, mode: rec.mode };
+  }
+  /** Whether this account can get an answer at all: the owner's key, or its own. */
+  const brainReady = async (device) => Boolean(cloud) || Boolean(await keyRecord(device));
+  /** Until Google's quota day turns over, after the owner's key ran out: users with their own key go straight to it. */
+  let sharedOutUntil = 0;
+  const outOfShared = (e) => e instanceof CloudError && ["quota", "cap"].includes(e.kind) && e.fresh !== false;
+  /**
+   * Run fn(brain) on the right key: the user's own when they chose "always" or
+   * when the owner's is used up; otherwise the owner's, moving to the user's
+   * key if the owner's runs out before any work started. result.keyUsed says which.
+   */
+  async function withBrain(device, fn) {
+    const own = await ownBrain(device).catch(() => null);
+    const mine = async () => {
+      try { const r = await fn(own.cloud); if (r && typeof r === "object") r.keyUsed = "own"; return r; }
+      catch (e) {
+        // The user's key, in words about the user's key.
+        if (e instanceof CloudError && e.kind === "setup") e.message = "Your Gemini key isn't working any more. Check or replace it in Settings.";
+        if (e instanceof CloudError && e.kind === "quota") e.message = "Your own Gemini key has used today's free limit too.";
+        throw e;
+      }
+    };
+    if (own && (own.mode === "always" || !cloud || now() < sharedOutUntil)) return mine();
+    if (!cloud) throw new CloudError("setup", "Phone mode isn't set up yet: add GEMINI_API_KEY on Render, or your own Gemini key in Settings.");
+    try { const r = await fn(cloud); if (r && typeof r === "object") r.keyUsed = "shared"; return r; }
+    catch (e) {
+      if (!outOfShared(e)) throw e;
+      if (e.kind === "quota") sharedOutUntil = e.resetsAt ?? 0;
+      if (!own) { e.message = `${e.message} Add your own free Gemini key in Settings to keep going.`; e.ownKeyHelps = true; throw e; }
+      return mine();
+    }
+  }
 
   let lastPoll = 0;
 
@@ -732,7 +787,7 @@ export function createRelay({
   function cloudFailure(e) {
     if (e?.suspended) return [403, { error: "suspended", message: e.message }];
     if (e?.input) return [400, { error: "input", message: e.message }];
-    if (e instanceof CloudError) return [CLOUD_STATUS[e.kind] ?? 502, { error: e.kind, message: e.message, resetsAt: e.resetsAt ?? null, retryAfter: e.retryAfter ?? null, retryable: e.retryable === true, ...(e.retryable && typeof e.retryVersion === 'string' ? { retryVersion: e.retryVersion } : {}) }];
+    if (e instanceof CloudError) return [CLOUD_STATUS[e.kind] ?? 502, { error: e.kind, message: e.message, resetsAt: e.resetsAt ?? null, retryAfter: e.retryAfter ?? null, retryable: e.retryable === true, ...(e.retryable && typeof e.retryVersion === 'string' ? { retryVersion: e.retryVersion } : {}), ...(e.ownKeyHelps ? { ownKeyHelps: true } : {}) }];
     if (e?.status === 413) return [413, { error: "input", message: "That's too long to send." }];
     if (e instanceof SyntaxError) return [400, { error: "input", message: "Bad request." }];
     return [502, { error: "failed", message: "Phone mode had a problem. Try again." }];
@@ -754,14 +809,46 @@ export function createRelay({
       await withPhones((phones) => { const dev=deviceOf(phones, claims.device); dev.phoneOnly = false; dev.pairedSession={gen:claims.gen,exp:claims.exp}; });
     }
     if (path === "/cloud/status" && req.method === "GET") {
+      const own = await keyRecord(claims.device);
       return send(res, 200, {
-        ready: Boolean(cloud), model: gemini?.model ?? null, store: store.remote ? "upstash" : "memory",
+        ready: Boolean(cloud) || Boolean(own), model: gemini?.model ?? null, store: store.remote ? "upstash" : "memory",
         macOnline, usage: cloud ? await cloud.usage().catch(() => null) : null, passExpires: claims.exp,
+        ownKey: own ? { last4: own.last4, mode: own.mode } : null, sharedOut: now() < sharedOutUntil, sharedKey: Boolean(cloud),
         // Agents may reason on a stronger model than chat.
         agentModel: cloud ? cloud.agentModel() : null,
       });
     }
     const device = claims.device;
+    // ---- Your own Gemini key (Settings) ----
+    if (path === "/cloud/key") {
+      if (req.method === "GET") { const own = await keyRecord(device); return send(res, 200, { ownKey: own ? { last4: own.last4, mode: own.mode, savedAt: own.savedAt } : null, sharedKey: Boolean(cloud), sharedOut: now() < sharedOutUntil }); }
+      if (req.method !== "POST") return send(res, 405, { message: "Method not allowed." });
+      if (hitLimit(`key:${device}`, 6)) return send(res, 429, { error: "busy", message: "Too many key changes this minute. Try again shortly." });
+      try {
+        const b = await readJson(req, 4096);
+        const mode = b.mode === "always" ? "always" : "fallback";
+        if (b.action === "remove") { await store.del(`ukey:${device}`); userKeys.delete(device); return send(res, 200, { ownKey: null }); }
+        if (b.action === "mode") {
+          const own = await keyRecord(device);
+          if (!own) return send(res, 400, { error: "input", message: "Add a key first." });
+          await store.set(`ukey:${device}`, { ...own, mode });
+          return send(res, 200, { ownKey: { last4: own.last4, mode } });
+        }
+        if (b.action !== "save") return send(res, 400, { error: "input", message: "Choose save, mode or remove." });
+        const key = String(b.key ?? "").trim();
+        if (!/^[A-Za-z0-9._-]{20,200}$/.test(key)) return send(res, 400, { error: "input", message: "That doesn't look like a Gemini API key. Copy it from aistudio.google.com/apikey." });
+        // Checked with Google before it is kept: a key that can't list models can't answer either.
+        try { const models = await makeGemini(key).listModels(); if (!models.length) throw new GeminiError("other", "No models"); }
+        catch (e) {
+          const kind = e instanceof GeminiError ? e.kind : "server";
+          return send(res, 400, { error: "input", message: kind === "auth" ? "Google didn't accept that key. Check you copied all of it from aistudio.google.com/apikey." : kind === "day" || kind === "minute" ? "That key works but is out of quota right now. Try again later." : "Couldn't check that key with Google just now. Try again." });
+        }
+        const rec = { key, last4: key.slice(-4), mode, savedAt: now() };
+        await store.set(`ukey:${device}`, rec);
+        userKeys.delete(device);
+        return send(res, 200, { ownKey: { last4: rec.last4, mode, savedAt: rec.savedAt } });
+      } catch (e) { return sendCloudError(res, e); }
+    }
     if(req.method === "GET" && path === "/cloud/bots") {
       try { return send(res,200,{...await bots.list(device),durable:store.remote}); } catch(e) { return sendCloudError(res,e); }
     }
@@ -1014,23 +1101,23 @@ export function createRelay({
           return send(res, 200, { ok: true });
         }
         if (path === "/cloud/browse/plan" || path === "/cloud/browse/step" || path === "/cloud/browse/report") {
-          if (!cloud) return send(res, 503, { error: "setup", message: "Echo's browsing needs Phone mode's brain: add GEMINI_API_KEY on Render." });
+          if (!(await brainReady(device))) return send(res, 503, { error: "setup", message: "Echo's browsing needs Phone mode's brain: add GEMINI_API_KEY on Render, or your own Gemini key in Settings." });
           if (rateLimited(device)) return send(res, 429, { error: "busy", message: "Slow down a little — too many requests this minute." });
           const b = await readJson(req, CLOUD_BODY);
           const context = b.context ?? {};
-          if (path === "/cloud/browse/plan") return send(res, 200, await cloud.browsePlan({ task: b.task, page: b.page, context }));
+          if (path === "/cloud/browse/plan") return send(res, 200, await withBrain(device, (brain) => brain.browsePlan({ task: b.task, page: b.page, context })));
           if (path === "/cloud/browse/report") {
-            const result = await cloud.browseReport({ task: b.task, plan: b.plan, notes: b.notes, sources: b.sources, context });
+            const result = await withBrain(device, (brain) => brain.browseReport({ task: b.task, plan: b.plan, notes: b.notes, sources: b.sources, context }));
             if (b.threadId && /^[a-zA-Z0-9_-]{8,80}$/.test(b.requestId)) await withConversations(device, (st) => recordTurn(threadFor(st, b.threadId), {
               requestId: b.requestId, text: `🌐 ${String(b.task).slice(0, 2000)}`, now: now(),
               result: { reply: result.report, actions: [], sources: (Array.isArray(b.sources) ? b.sources : []).slice(0, 4).filter((s) => /^https?:\/\//.test(s?.url)).map((s) => ({ title: String(s.title).slice(0, 100), url: String(s.url).slice(0, 2000) })), saved: [], references: [], captures: [] },
             }));
             return send(res, 200, result);
           }
-          return send(res, 200, await cloud.browseStep({
+          return send(res, 200, await withBrain(device, (brain) => brain.browseStep({
             task: b.task, plan: b.plan, current: b.current, attempt: b.attempt, lastFail: b.lastFail, memory: b.memory,
             history: b.history, notes: b.notes, page: b.page, userSaid: b.userSaid, blocked: Array.isArray(b.blocked) ? b.blocked.slice(0, 20).map(String) : [], context,
-          }));
+          })));
         }
       } catch (e) {
         if (e?.input) return send(res, 400, { error: "input", message: e.message });
@@ -1126,13 +1213,13 @@ export function createRelay({
       } catch (e) { return sendCloudError(res, e); }
     }
     if (path === "/cloud/snap") {
-      if (!cloud) return send(res, 503, { error: "setup", message: "Snap needs Phone mode's brain: add GEMINI_API_KEY on Render." });
+      if (!(await brainReady(device))) return send(res, 503, { error: "setup", message: "Snap needs Phone mode's brain: add GEMINI_API_KEY on Render, or your own Gemini key in Settings." });
       if (rateLimited(claims.device)) return send(res, 429, { error: "busy", message: "Slow down a little — too many requests this minute." });
       try {
         const body = await readJson(req, CLOUD_VOICE_BODY);
         const image = String(body.image ?? "");
         if (image.length > MAX_IMAGE_B64 || !/^[A-Za-z0-9+/=]{1000,}$/.test(image)) return send(res, 400, { error: "input", message: "That photo didn't come through. Try again." });
-        const result = await cloud.snap({ image, context: body.context ?? {} });
+        const result = await withBrain(device, (brain) => brain.snap({ image, context: body.context ?? {} }));
         withLinks(result.actions);
         if (result.snap.readable) {
           result.id = randomUUID().slice(0, 8);
@@ -1151,7 +1238,7 @@ export function createRelay({
         if(b.action==='stop')return send(res,200,await bots.stop(device,b.id));
         if(b.action==='control')return send(res,200,await bots.control(device,b));
         if(b.action==='run'){
-          if(!cloud)throw new CloudError('setup','Bots need Phone mode’s brain configuration.');
+          if(!(await brainReady(device)))throw new CloudError('setup','Bots need Phone mode’s brain: add GEMINI_API_KEY on Render, or your own Gemini key in Settings.');
           const context={...(b.context&&typeof b.context==='object'?b.context:{}),device,requestId:b.requestId,macOnline};
           return send(res,202,await bots.run(device,b,context));
         }
@@ -1159,7 +1246,7 @@ export function createRelay({
       }catch(e){return sendCloudError(res,e);}
     }
     if (path === "/cloud/chat" || path === "/cloud/voice") {
-      if (!cloud) return send(res, 503, { error: "setup", message: "Phone mode isn't set up yet: add GEMINI_API_KEY on Render." });
+      if (!(await brainReady(device))) return send(res, 503, { error: "setup", message: "Phone mode isn't set up yet: add GEMINI_API_KEY on Render, or your own Gemini key in Settings." });
       if (rateLimited(claims.device)) return send(res, 429, { error: "busy", message: "Slow down a little — too many messages this minute." });
       const turn = new AbortController();
       const ensure = async () => turn.signal.throwIfAborted();
@@ -1200,9 +1287,9 @@ export function createRelay({
           const history = t ? t.messages.map((m) => ({ role: m.from === "you" ? "user" : "echo", text: m.text })) : body.history;
           let r;
           try {
-            r = await cloud.chat({ history, text: path === "/cloud/chat" ? body.text : undefined, audio: path === "/cloud/voice" ? body.audio : undefined,
+            r = await withBrain(device, (brain) => brain.chat({ history, text: path === "/cloud/chat" ? body.text : undefined, audio: path === "/cloud/voice" ? body.audio : undefined,
               context: { ...context, threadId }, memory: mem, signal: turn.signal, ensure,
-              ...(live ? { onStream: (event) => emit(event.type, event.type === "delta" ? { text: event.text } : event.type === "tool" ? { name: event.name, ...(event.detail ? { detail: event.detail } : {}) } : {}) } : {}) });
+              ...(live ? { onStream: (event) => emit(event.type, event.type === "delta" ? { text: event.text } : event.type === "tool" ? { name: event.name, ...(event.detail ? { detail: event.detail } : {}) } : {}) } : {}) }));
           } catch (error) {
             if (t && error instanceof CloudError && error.retryable === true) error.retryVersion = retryVersion;
             throw error;

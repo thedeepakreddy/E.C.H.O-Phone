@@ -294,6 +294,10 @@ echo-orb { display: inline-block; flex: none; line-height: 0; vertical-align: mi
 echo-orb[hidden] { display: none; }
 echo-orb canvas { display: block; }
 .orb-line { display: flex; align-items: center; gap: 8px; }
+/* Settings → Your Gemini key */
+.key-row { display: flex; gap: 8px; align-items: center; width: 100%; }
+.key-row .row-input { flex: 1; min-width: 0; }
+#key-save[aria-busy="true"] { opacity: .6; }
 .msg.live > echo-orb { display: block; margin-top: 6px; opacity: .85; }
 #voice-home:not([hidden]) { display: flex; align-items: center; justify-content: center; gap: 8px; }
 #voice-chat-status { display: inline-flex; align-items: center; gap: 8px; }
