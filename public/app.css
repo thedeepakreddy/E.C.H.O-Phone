@@ -288,9 +288,21 @@ body[data-status="asleep"] { --glow: #ff4d4d; --spin: 22s; --m50-hue: -178deg; -
 .day { align-self: center; font-size: 12px; padding: 4px 10px; border-radius: 999px; background: rgba(255, 255, 255, .08); color: var(--sub); }
 .msg.live .via { opacity: .8; }
 .typing[hidden] { display: none; }
-.typing { align-self: flex-start; padding: 12px 16px; border-radius: 20px 20px 20px 6px; display: flex; gap: 5px; }
-.typing i { width: 7px; height: 7px; border-radius: 50%; background: #dff; animation: breathe 1s ease-in-out infinite; }
-.typing i:nth-child(2) { animation-delay: .2s; } .typing i:nth-child(3) { animation-delay: .4s; }
+.typing { align-self: flex-start; padding: 10px 14px; border-radius: 20px 20px 20px 6px; display: flex; }
+/* Thinking orbs (public/orbs.js): dotted canvas figures that say what Echo is doing. */
+echo-orb { display: inline-block; flex: none; line-height: 0; vertical-align: middle; }
+echo-orb[hidden] { display: none; }
+echo-orb canvas { display: block; }
+.orb-line { display: flex; align-items: center; gap: 8px; }
+.msg.live > echo-orb { display: block; margin-top: 6px; opacity: .85; }
+#voice-home:not([hidden]) { display: flex; align-items: center; justify-content: center; gap: 8px; }
+#voice-chat-status { display: inline-flex; align-items: center; gap: 8px; }
+#get-started echo-orb { margin: -4px 4px 0 0; }
+.novid-in { display: grid; justify-items: center; gap: 12px; text-align: center; padding: 0 24px; }
+.br-run > echo-orb { margin-left: 2px; }
+.office-state > echo-orb { margin-right: 6px; }
+.office-desk-label > echo-orb { margin-right: 6px; }
+.bcard h2 > echo-orb { margin-right: 8px; vertical-align: -3px; }
 .chips { display: flex; gap: 8px; overflow-x: auto; padding: 0 12px 8px; flex: none; scrollbar-width: none; touch-action: pan-x; }
 .chips::-webkit-scrollbar { display: none; }
 .chip { flex: none; min-height: 36px; padding: 0 14px; border-radius: 999px; font-size: 13px; }
@@ -522,14 +534,14 @@ body.kb .br-panel { margin-bottom: 8px; }
 .br-ask textarea { flex: 1; resize: none; height: 40px; max-height: 110px; padding: 9px 0; line-height: 22px; }
 .br-run { display: flex; align-items: center; gap: 12px; padding: 8px 6px 8px 12px; }
 .br-run b { display: block; font-size: 14px; }
-.br-spin { flex: none; width: 18px; height: 18px; border-radius: 50%; border: 2px solid rgba(94, 231, 245, .25); border-top-color: var(--cyan); animation: br-turn .8s linear infinite; }
+
 @keyframes br-turn { to { transform: rotate(360deg); } }
 .br-result { max-height: 38vh; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; padding: 8px 10px 6px; display: flex; flex-direction: column; gap: 8px; }
 .br-result-head { gap: 8px; }
 .br-answer { white-space: pre-wrap; font-size: 15px; line-height: 1.42; user-select: text; -webkit-user-select: text; }
 .br-result .srcs { display: flex; flex-wrap: wrap; gap: 6px; }
 .ba-what { font-size: 17px; font-weight: 600; line-height: 1.35; }
-@media (prefers-reduced-motion: reduce) { .br-spin, .br-progress.on { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .br-progress.on { animation: none; } }
 .br-stall { position: absolute; left: 12px; right: 12px; bottom: 12px; border-radius: 22px; padding: 14px; display: flex; flex-direction: column; gap: 8px; z-index: 2; }
 .br-retry { min-height: 46px; font-size: 15px; border-radius: 16px; }
 /* Echo's plan and the human in the loop */

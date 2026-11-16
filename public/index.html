@@ -260,7 +260,7 @@
       <p class="br-count" id="br-count"></p>
     </div>
     <div class="br-run" id="br-run" hidden>
-      <span class="br-spin" aria-hidden="true"></span>
+      <echo-orb id="br-orb" state="working" size="20" aria-label="Echo is browsing"></echo-orb>
       <div class="grow"><b id="br-run-title">Echo is browsing</b><span class="sub small clamp2" id="br-run-line">Starting…</span></div>
       <button class="glass small-pill" id="br-takeover">Take over</button>
     </div>
@@ -339,7 +339,7 @@
       <img id="screen-frame" alt="Your Mac's screen" hidden>
       <audio id="mac-audio" autoplay muted></audio>
       <span class="glass pill live"><span class="dot red pulse"></span><span id="live-mode">LIVE</span></span>
-      <div class="novid" id="novid"><span>Connecting to your Mac…</span></div>
+      <div class="novid" id="novid"><span class="novid-in"><echo-orb state="connecting" size="64" aria-label="Connecting to your Mac"></echo-orb><span id="novid-text">Connecting to your Mac…</span></span></div>
     </div></div>
     <div class="glass seg" role="tablist" aria-label="Control">
       <button role="tab" data-ctl="pad" aria-selected="true">Trackpad</button>
@@ -557,6 +557,8 @@
 <script src="/markdown.js" defer></script>
 <script src="/humanoid-core.js" defer></script>
 <script src="/experience.js" defer></script>
+<script src="/vendor/thinking-orbs.js" defer></script>
+<script src="/orbs.js" defer></script>
 <script src="/voice-session.js" defer></script>
 <script src="/speech-particles.js" defer></script>
 <script src="/bots.js" defer></script>

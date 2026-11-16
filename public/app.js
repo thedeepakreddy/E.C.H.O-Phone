@@ -72,6 +72,10 @@
 
   // ---------- toast ----------
   let toastTimer = 0;
+  /** A thinking orb (public/orbs.js); nothing when the orbs didn't load, so text still reads. */
+  const orb = (state, size = 20, label) => window.EchoOrbs ? window.EchoOrbs.make(state, size, label) : document.createTextNode("");
+  /** Text with a small orb before it, for a status that is still in progress. */
+  function orbLine(tag, cls, state, text) { const n = el(tag, `${cls} orb-line`); n.append(orb(state), el("span", "", text)); return n; }
   function toast(text, bad = false) {
     const t = $("toast");
     t.textContent = text;
@@ -226,7 +230,7 @@
   }
   $("get-started").addEventListener("click", async () => {
     const button = $("get-started");
-    button.disabled = true; button.textContent = "Starting…"; $("start-error").textContent = "";
+    button.disabled = true; button.replaceChildren(orb("connecting", 20, "Starting"), " Starting…"); $("start-error").textContent = "";
     try {
       await ensurePhoneSession();
       if (T && S) start();
@@ -832,9 +836,10 @@
       $("listen-label").textContent = active ? "Pause" : "Listen";
       $("chat-talk").setAttribute("aria-pressed", String(active));
       $("chat-talk").setAttribute("aria-label", active ? "Stop voice conversation" : "Start voice conversation");
-      $("voice-home").textContent = line;
+      const voiceOrb = { starting: "connecting", listening: "listening", thinking: "breathing", speaking: "composing" }[state];
+      $("voice-home").replaceChildren(...(voiceOrb ? [orb(voiceOrb)] : []), line);
+      $("voice-chat-status").replaceChildren(...(voiceOrb ? [orb(voiceOrb)] : []), line);
       $("voice-home").hidden = !active;
-      $("voice-chat-status").textContent = line;
       $("voice-chat").hidden = !active;
       for (const id of ["humanoid-talk", "chat-humanoid-talk"]) {
         $(id).setAttribute("aria-pressed", String(active));
@@ -1099,22 +1104,27 @@
     get_weather: "Checking the weather…", world_events: "Checking world events…", recall_memory: "Looking through what you saved…", get_today: "Checking Today…",
     save_memory: "Saving…", remind_me: "Saving to Today…", capture_commitment: "Saving to Today…", update_commitment: "Updating Today…", run_bot: "Handing it to a bot…",
   };
+  /** Which orb a tool shows: looking things up, wiring live sources, filing, or handing off. */
+  const TOOL_ORB = { web_search: "searching", search_research: "searching", read_web_page: "searching", image_search: "searching", recall_memory: "searching",
+    get_weather: "connecting", world_events: "connecting", get_today: "connecting",
+    save_memory: "weaving", remind_me: "weaving", capture_commitment: "weaving", update_commitment: "weaving", run_bot: "working" };
   let live = null;
   function paintLive() {
     if (!live) return;
     live.frame = 0;
     if (!live.node) { live.node = el("div", "msg echo glass live"); live.node.setAttribute("aria-live", "off"); }
     clear(live.node);
-    if (live.text) live.node.appendChild(window.EchoMarkdown.render(live.text));
-    else live.node.appendChild(el("span", "via", live.status));
+    if (live.text) { live.node.appendChild(window.EchoMarkdown.render(live.text)); live.node.appendChild(orb("composing", 20, "Echo is writing")); }
+    else live.node.appendChild(orbLine("span", "via", live.orb || "breathing", live.status));
     const typing = $("typing");
-    if (typing) typing.hidden = !!live.text;
+    // One orb at a time: the live bubble says what Echo is doing, so the thinking bubble steps aside.
+    if (typing) typing.hidden = true;
     if (live.node.parentNode !== messagesEl || live.node.nextSibling !== typing) messagesEl.insertBefore(live.node, typing);
     if (stickToBottom) scrollMessages();
   }
   function liveEvent(event, d, threadId) {
     if (event === "delta") { live ??= { text: "", status: "", threadId }; live.text += d.text; }
-    else if (event === "tool") { if (!TOOL_STATUS[d.name]) return; live ??= { text: "", status: "", threadId }; live.status = TOOL_STATUS[d.name]; live.text = ""; }
+    else if (event === "tool") { if (!TOOL_STATUS[d.name]) return; live ??= { text: "", status: "", threadId }; live.status = TOOL_STATUS[d.name]; live.orb = TOOL_ORB[d.name]; live.text = ""; }
     else if (event === "reset") { if (!live) return; live.text = ""; if (!live.status) return endLive(); }
     else return;
     if (live.threadId !== currentThread) return;
@@ -1149,7 +1159,7 @@
   }
   function renderTyping(on) {
     let t = $("typing");
-    if (on && !t) { t = el("div", "typing glass"); t.id = "typing"; t.setAttribute("aria-label", "Echo is typing"); t.append(el("i"), el("i"), el("i")); messagesEl.appendChild(t); }
+    if (on && !t) { t = el("div", "typing glass"); t.id = "typing"; t.setAttribute("role", "status"); t.append(orb("breathing", 20, "Echo is thinking")); messagesEl.appendChild(t); }
     if (!on && t) t.remove();
     if (on && t && t !== messagesEl.lastChild) messagesEl.appendChild(t); // keep it last
     $("presence").textContent = on ? "typing…" : mode === "phone" ? "on your phone" : macOnline ? "online" : "offline";
@@ -1927,7 +1937,7 @@
     const st = snapState || {};
     if (st.url) { const img = el("img", "snap-photo"); img.src = st.url; img.alt = "Your photo"; box.appendChild(img); }
     if (st.fromHistory) box.appendChild(el("p", "brief-date", `Scanned ${new Date(st.at).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" })} · ${clock(st.at)}`));
-    if (st.busy) { const c = el("section", "glass bcard"); c.appendChild(el("p", "snap-busy", st.url ? "Reading your photo…" : "Preparing your photo…")); box.appendChild(c); }
+    if (st.busy) { const c = el("section", "glass bcard"); const p = el("p", "snap-busy"); p.append(orb(st.url ? "solving" : "shaping", 64), el("span", "", st.url ? "Reading your photo…" : "Preparing your photo…")); c.appendChild(p); box.appendChild(c); }
     else if (st.error || (st.result && !st.result.readable)) {
       const c = el("section", "glass bcard");
       c.append(el("p", "", st.error || "I couldn't read that. Try closer, flatter, with more light."));
@@ -2205,7 +2215,7 @@
       list.appendChild(c);
       return;
     }
-    if (!memLoaded) { const c = el("section", "glass bcard"); c.appendChild(el("p", "sub small", "Loading what you saved…")); list.appendChild(c); return; }
+    if (!memLoaded) { const c = el("section", "glass bcard"); c.appendChild(orbLine("p", "sub small", "searching", "Loading what you saved…")); list.appendChild(c); return; }
     if (!mem.items.length) {
       const c = el("section", "glass bcard");
       c.append(el("p", "", "Nothing saved yet."), el("p", "sub small", "Snap a bill, letter, ticket or document and tap Save to memory, or tap + to write something down. Echo remembers it, finds it when you ask, and reminds you of its dates."));
@@ -2869,6 +2879,8 @@
   const MARK = { pending: "○", active: "●", done: "✓", failed: "✕", skipped: "↷" };
   function renderRun(title, line) {
     $("br-run").hidden = false;
+    const brOrb = $("br-orb");
+    if (brOrb) brOrb.state = /needs you/i.test(title) ? "listening" : /planning/i.test(title) ? "solving" : /report/i.test(title) ? "composing" : /waiting/i.test(title) ? "breathing" : "working";
     $("br-run-title").textContent = title;
     $("br-run-line").textContent = line;
   }
@@ -3359,7 +3371,7 @@
   function renderBriefing(b) {
     const box = $("brief-body");
     clear(box);
-    if (!b) { const l = el("div", "glass list"); l.appendChild(el("p", "sub empty", "Getting today's briefing…")); box.appendChild(l); return; }
+    if (!b) { const l = el("div", "glass list"); l.appendChild(orbLine("p", "sub empty", "weaving", "Getting today's briefing…")); box.appendChild(l); return; }
     box.appendChild(el("p", "brief-date", `${new Date(b.at).toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" })} · ${clock(b.at)}`));
     if (b.weather) box.appendChild(bcard(b.place || "Weather", el("div", "big", `${b.weather.temp}° ${b.weather.text}`), el("p", "sub small", `${b.weather.forecastPeriod === "next_24_hours" ? "Next 24 hours: " : ""}High ${b.weather.high}°, low ${b.weather.low}°.${b.weather.tip ? ` ${b.weather.tip}` : ""}`)));
     else box.appendChild(bcard("Weather", el("p", "sub small", b.place ? "Weather isn't available right now." : "Set your weather location in Settings for weather and nearby alerts.")));
@@ -3466,7 +3478,7 @@
     try { a.pause(); } catch { /* fine */ }
     a.srcObject = null; a.muted = true;
     $("audio-btn").setAttribute("aria-pressed", "false");
-    if (video.srcObject) { video.srcObject = null; $("novid").hidden = false; }
+    if (video.srcObject) { video.srcObject = null; $("novid").hidden = false; $("novid-text").textContent = "Connecting to your Mac…"; $("novid").querySelector("echo-orb")?.removeAttribute("hidden"); }
   }
   function startFrames() { if (framesOn || currentView !== "screen") return; framesOn = true; $("live-mode").textContent = "SNAPSHOTS"; nextFrame(); }
   function stopFrames() { framesOn = false; frame.hidden = true; $("live-mode").textContent = "LIVE"; }
@@ -3480,7 +3492,7 @@
       const old = frameUrl; frameUrl = URL.createObjectURL(frameBlob);
       frame.onload = () => { if (old) URL.revokeObjectURL(old); };
       frame.src = frameUrl; frame.hidden = false; $("novid").hidden = true;
-    } catch (e) { $("novid").hidden = false; $("novid").firstChild.textContent = e.message || "Couldn't get the screen."; }
+    } catch (e) { $("novid").hidden = false; $("novid-text").textContent = e.message || "Couldn't get the screen."; $("novid").querySelector("echo-orb")?.setAttribute("hidden", ""); }
     if (framesOn) setTimeout(nextFrame, Math.max(0, 500 - (Date.now() - asked)));
   }
   $("audio-btn").addEventListener("click", () => {
