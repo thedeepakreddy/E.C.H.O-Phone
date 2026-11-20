@@ -12,3 +12,8 @@ services:
         value: "22"
       - key: RELAY_SECRET
         sync: false
+      # Optional: Phone mode's brain through ARC (lib/arc.js) instead of GEMINI_API_KEY.
+      - key: ARC_BASE_URL
+        sync: false
+      - key: ARC_API_KEY
+        sync: false

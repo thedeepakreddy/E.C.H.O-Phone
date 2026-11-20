@@ -25,6 +25,10 @@ import {createMacUpdates} from './lib/mac-updates.js';
  *   GEMINI_EMBED_MODEL         search by meaning in saved memory (default gemini-embedding-001)
  *   GEMINI_AGENT_MODEL         the model bots reason on (default gemini-4-hydrogen, free tier; "off" to use GEMINI_MODEL)
  *   GEMINI_BROWSE_MODEL        Echo's browsing, comma-separated in order (default: the two best Flash models the key can use)
+ *   ARC_BASE_URL, ARC_API_KEY  the cloud brain through ARC instead of GEMINI_API_KEY (lib/arc.js): ARC holds the
+ *                              provider keys and picks the model and key; users' own Gemini keys still go to Google
+ *   ARC_MODEL                  default "auto" (ARC chooses); or arc/fast, or a provider/model ARC lists
+ *   ARC_EMBED_MODEL            default gemini/gemini-embedding-001, so saved memory stays searchable
  *
  * Get started issues a standalone Phone session (lib/secure.js), with no Mac
  * required. Optional Mac sign-in adds a paired pass for the same phone id.
@@ -46,6 +50,7 @@ import { createAdmin } from "./lib/admin.js";
 import { MAC_ROUTES } from "./lib/mac-routes.js";
 import { metWeather, invalidWeather } from "./lib/weather.js";
 import { createGemini, pickBrowseModels, pickFallbackModels, GeminiError } from "./lib/gemini.js";
+import { createArc } from "./lib/arc.js";
 import { createCloud, CloudError } from "./lib/cloud.js";
 import { buildIcs, validEvent } from "./lib/calendar.js";
 import { ensureSchedule } from "./lib/tick.js";
@@ -157,8 +162,11 @@ export function createRelay({
   adminPassword = "", deployment = {},
   /** Tests only: where Echo's own web search fetches its result pages (lib/web-search.mjs). */
   searchFetch = undefined,
-  /** A Gemini client for a user's own key (tests pass a stand-in). */
-  makeGemini = (apiKey) => createGemini({ apiKey, ...(gemini?.model ? { model: gemini.model } : {}) }),
+  /**
+   * A Gemini client for a user's own key (tests pass a stand-in). Always Google directly, even
+   * when the shared brain goes through ARC, so it never inherits ARC's model name.
+   */
+  makeGemini = (apiKey) => createGemini({ apiKey, ...(gemini?.model && gemini.via !== "arc" ? { model: gemini.model } : {}) }),
 } = {}) {
   if (!secret || secret.length < 32) throw new Error("RELAY_SECRET must be set (at least 32 characters).");
   const secretBuf = Buffer.from(secret);
@@ -1606,7 +1614,13 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const store = createStore({ url: env.UPSTASH_REDIS_REST_URL, token: env.UPSTASH_REDIS_REST_TOKEN, key: keys.store });
   // Unset keeps the default model; "off" turns that feature's model off.
   const optionalModel = (key, value) => { const v = String(value ?? "").trim(); return !v ? {} : { [key]: /^(off|none|false)$/i.test(v) ? null : v }; };
-  const gemini = paired && env.GEMINI_API_KEY ? createGemini({
+  // The shared brain: through ARC when ARC_BASE_URL and ARC_API_KEY are set (ARC holds the
+  // owner's provider keys and picks a healthy free model and key), otherwise Gemini directly.
+  const viaArc = paired && env.ARC_BASE_URL?.trim() && env.ARC_API_KEY?.trim();
+  const gemini = viaArc ? createArc({
+    baseUrl: env.ARC_BASE_URL.trim(), apiKey: env.ARC_API_KEY.trim(), model: env.ARC_MODEL?.trim() || undefined,
+    embedModel: env.ARC_EMBED_MODEL?.trim() || undefined,
+  }) : paired && env.GEMINI_API_KEY ? createGemini({
     apiKey: env.GEMINI_API_KEY.trim(), model: env.GEMINI_MODEL?.trim() || undefined,
     embedModel: (env.GEMINI_EMBED_MODEL || "gemini-embedding-001").trim(), base: env.GEMINI_BASE || undefined,
     ...optionalModel("agentModel", env.GEMINI_AGENT_MODEL),
@@ -1616,9 +1630,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     limits: { messages: Number(env.PHONE_DAILY_MESSAGES) || 200, snaps: Number(env.PHONE_DAILY_SNAPS) || 30, browseSteps: Number(env.PHONE_DAILY_BROWSE) || 300 },
     adminPassword: env.ECHO_ADMIN_PASSWORD || "", deployment: { commit: env.RENDER_GIT_COMMIT, scheduler: Boolean(env.QSTASH_TOKEN) },
   });
-  console.log(`Phone mode: brain ${gemini ? gemini.model : "off (no GEMINI_API_KEY)"}, store ${store.remote ? "Upstash" : "memory only (no UPSTASH_REDIS_REST_URL/TOKEN)"}`);
+  console.log(`Phone mode: brain ${gemini ? (gemini.via === "arc" ? `ARC (${gemini.model}, embeddings ${gemini.embedModel})` : gemini.model) : "off (no GEMINI_API_KEY or ARC_API_KEY)"}, store ${store.remote ? "Upstash" : "memory only (no UPSTASH_REDIS_REST_URL/TOKEN)"}`);
   // Browsing uses a stronger model with its own free quota: GEMINI_BROWSE_MODEL, or the best Flash model this key has.
-  if (gemini) {
+  // Through ARC, model choice and fallback are ARC's job: no Gemini model discovery here.
+  if (gemini && gemini.via !== "arc") {
     const chosen = String(env.GEMINI_BROWSE_MODEL ?? "").trim();
     if (chosen) { gemini.browseModels = chosen.split(",").map((x) => x.trim()).filter(Boolean); console.log(`Browsing: ${gemini.browseModels.join(" → ")} (GEMINI_BROWSE_MODEL)`); }
     void gemini.listModels()
