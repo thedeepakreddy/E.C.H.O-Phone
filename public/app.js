@@ -78,7 +78,7 @@
   function orbLine(tag, cls, state, text) { const n = el(tag, `${cls} orb-line`); n.append(orb(state), el("span", "", text)); return n; }
   function toast(text, bad = false) {
     // The limit banner already explains a used-up limit; one message, not two.
-    if (bad && /Your Gemini key/.test(text) && !$("limit-banner").hidden) return;
+    if (bad && /Your own key/.test(text) && !$("limit-banner").hidden) return;
     const t = $("toast");
     t.textContent = text;
     t.classList.toggle("bad", bad);
@@ -506,13 +506,16 @@
     if (changed && currentView === "missions") renderMissions(); // "Running" becomes "Last seen running", and back
   }
   const prettyModel = (m) => String(m || "").replace(/-preview.*$/, "").replace(/^gemini-/i, "Gemini ").replace(/-([a-z])/g, (_, c) => ` ${c.toUpperCase()}`).replace("Flash Lite", "Flash-Lite");
-  // ---------- Settings → Your Gemini key ----------
+  // ---------- Settings → Your own key (Gemini or ARC) ----------
   // The key goes to the server once, is checked with Google there, and never comes back: the phone only ever sees its last 4 characters.
   let keyInfo = null;
   function renderKey() {
     const own = keyInfo?.ownKey;
-    $("key-state").textContent = !keyInfo ? "Checking…" : own ? (own.mode === "always" || !keyInfo.sharedKey ? `Your key ••••${own.last4}` : keyInfo.sharedOut ? `Your key ••••${own.last4} (Echo's limit is used up)` : `Echo's key, then yours ••••${own.last4}`) : keyInfo.sharedOut ? "Echo's key · used up for today" : "Echo's key";
-    $("key-label").textContent = own ? "Replace your key" : "Your own free Gemini API key";
+    const yours = own ? `your ${own.provider === "arc" ? "ARC" : "Gemini"} key ••••${own.last4}` : "";
+    const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+    $("key-state").textContent = !keyInfo ? "Checking…" : own ? (own.mode === "always" || !keyInfo.sharedKey ? cap(yours) : keyInfo.sharedOut ? `${cap(yours)} (Echo's limit is used up)` : `Echo's key, then ${yours}`) : keyInfo.sharedOut ? "Echo's key · used up for today" : "Echo's key";
+    $("key-label").textContent = own ? "Replace your key" : "Your Gemini or ARC key";
+    if (keyInfo?.arcUrl) { $("arc-link").href = keyInfo.arcUrl; $("arc-link").textContent = new URL(keyInfo.arcUrl).host; }
     $("key-mode").value = own?.mode || $("key-mode").value || "fallback";
     $("key-remove").hidden = !own;
   }
@@ -532,7 +535,7 @@
       input.value = "";
       keyInfo = { ...(keyInfo || {}), ownKey: d.ownKey };
       renderKey(); refreshCloud();
-      toast(`Saved. Google accepted your key ••••${d.ownKey.last4}.`);
+      toast(`Saved. ${d.ownKey.provider === "arc" ? "ARC" : "Google"} accepted your key ••••${d.ownKey.last4}.`);
     } catch (err) { toast(err.data?.message || err.message || "Couldn't save that key.", true); }
     finally { btn.removeAttribute("aria-busy"); btn.textContent = "Save"; }
   });
@@ -542,7 +545,7 @@
     catch (err) { toast(err.data?.message || err.message, true); renderKey(); }
   });
   $("key-remove").addEventListener("click", async () => {
-    if (!confirm("Remove your Gemini key from Echo? Echo goes back to its own key only.")) return;
+    if (!confirm("Remove your key from Echo? Echo goes back to its own key only.")) return;
     try { await cloudApi("/cloud/key", { action: "remove" }); keyInfo = { ...(keyInfo || {}), ownKey: null }; renderKey(); refreshCloud(); toast("Your key is removed."); }
     catch (err) { toast(err.data?.message || err.message, true); }
   });
@@ -751,7 +754,7 @@
   setInterval(() => { if (!document.hidden) refreshCloud(); }, 20_000);
   // ---------- Echo's daily limit is used up ----------
   // Wherever it happens (Chat, voice, Snap, Browser, agents), the user learns that
-  // Settings → Your Gemini key lets them carry on. "Later" hides it until Echo's
+  // Settings → Your own key lets them carry on. "Later" hides it until Echo's
   // limit comes back; another failed request shows it again.
   const LIMIT_KEY = "echo_limit_later";
   function openKeySettings() {
@@ -768,7 +771,7 @@
     if (cloudInfo?.ownKey) return; // they already have one
     const later = Number(store.get(LIMIT_KEY)) || 0;
     if (!fromFailure && later > Date.now()) return;
-    $("limit-text").replaceChildren("Add your own free Gemini key in ", el("b", "", "Settings → Your Gemini key"), ` to keep going now${backAt ? `, or wait until ${clock(backAt)} when Echo's limit comes back` : ""}.`);
+    $("limit-text").replaceChildren("Add your own free Gemini key (or an ARC key) in ", el("b", "", "Settings → Your own key"), ` to keep going now${backAt ? `, or wait until ${clock(backAt)} when Echo's limit comes back` : ""}.`);
     $("limit-banner").hidden = false;
   }
   function hideLimitBanner(later = true) {
@@ -1110,7 +1113,7 @@
       n.setAttribute('role', 'status');
       // Echo's own key is used up for today: one tap to add yours.
       if (m.ownKeyHelps) {
-        const acts = el('div', 'acts'), add = el('button', 'glass act-btn', 'Add my Gemini key');
+        const acts = el('div', 'acts'), add = el('button', 'glass act-btn', 'Add my key');
         add.type = 'button';
         add.addEventListener('click', (event) => { event.stopPropagation(); openKeySettings(); });
         acts.append(add); n.append(acts);

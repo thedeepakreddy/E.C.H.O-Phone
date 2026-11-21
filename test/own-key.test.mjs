@@ -7,6 +7,7 @@ import { GeminiError } from "../lib/gemini.js";
 
 const SECRET = "s".repeat(48);
 const GOOD = "AIzaSyD-user-key-0123456789abcdefWXYZ";
+const ARC_GOOD = `ARC_DEE_${"a".repeat(17)}_PAK_${"b".repeat(39)}ARCK`;
 const answer = (t) => ({ candidates: [{ content: { role: "model", parts: [{ text: t }] } }] });
 const call = (name, args) => ({ candidates: [{ content: { role: "model", parts: [{ functionCall: { name, args } }] } }] });
 
@@ -23,7 +24,14 @@ async function relay(gemini) {
     made.push(client);
     return client;
   };
-  const r = createRelay({ secret: SECRET, gemini, makeGemini });
+  const makeArc = (apiKey) => {
+    const client = { via: "arc", apiKey, calls: [], model: "auto",
+      listModels: async () => { if (apiKey !== ARC_GOOD) throw new GeminiError("auth", "Invalid ARC API key", { via: "arc" }); return ["auto", "openrouter/some-model:free"]; },
+      generate: async (body) => { client.calls.push(body); return answer("Your ARC key answered."); } };
+    made.push(client);
+    return client;
+  };
+  const r = createRelay({ secret: SECRET, gemini, makeGemini, makeArc });
   const server = http.createServer(r.handler);
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -76,7 +84,7 @@ test("when Echo's key runs out, the user's key answers, and keeps answering unti
     const stuck = await other.post("/cloud/chat", { text: "Hello", context: {} });
     assert.equal(stuck.status, 429);
     assert.equal(stuck.body.ownKeyHelps, true);
-    assert.match(stuck.body.message, /Add your own free Gemini key in Settings → Your Gemini key/);
+    assert.match(stuck.body.message, /Add your own free Gemini key \(or an ARC key\) in Settings → Your own key/);
   } finally { r.close(); }
 });
 
@@ -115,5 +123,30 @@ test("a relay without its own key still works for users who bring theirs", async
     await me.post("/cloud/key", { action: "save", key: GOOD });
     assert.equal((await me.get("/cloud/status")).body.ready, true);
     assert.equal((await me.post("/cloud/chat", { text: "Hi", context: {} })).body.reply, "Your key answered.");
+  } finally { r.close(); }
+});
+
+test("an ARC key is told apart from a Gemini key, checked with ARC, and answers through the user's own ARC", async () => {
+  const shared = owner([dayQuota()]);
+  const r = await relay(shared);
+  try {
+    const me = r.as(await r.session());
+    const cut = await me.post("/cloud/key", { action: "save", key: ARC_GOOD.slice(0, 30) });
+    assert.equal(cut.status, 400);
+    assert.match(cut.body.message, /doesn't look like a whole ARC key/);
+    const wrong = await me.post("/cloud/key", { action: "save", key: `ARC_DEE_${"c".repeat(17)}_PAK_${"d".repeat(43)}` });
+    assert.equal(wrong.status, 400);
+    assert.match(wrong.body.message, /ARC didn't accept that key/);
+    const saved = await me.post("/cloud/key", { action: "save", key: ARC_GOOD, mode: "always" });
+    assert.deepEqual([saved.status, saved.body.ownKey.provider, saved.body.ownKey.last4], [200, "arc", "ARCK"]);
+    assert.ok(!saved.text.includes(ARC_GOOD.slice(0, 20)), "the key itself never leaves the server");
+    const read = await me.get("/cloud/key");
+    assert.equal(read.body.ownKey.provider, "arc");
+    assert.match(read.body.arcUrl, /\/dashboard$/);
+    const reply = await me.post("/cloud/chat", { text: "Hello", context: {} });
+    assert.equal(reply.status, 200);
+    assert.equal(reply.body.reply, "Your ARC key answered.");
+    assert.equal(reply.body.keyUsed, "own");
+    assert.equal(shared.calls.length, 0, "with \"Always\", Echo's key isn't used");
   } finally { r.close(); }
 });
