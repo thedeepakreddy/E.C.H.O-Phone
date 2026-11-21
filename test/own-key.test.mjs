@@ -150,3 +150,22 @@ test("an ARC key is told apart from a Gemini key, checked with ARC, and answers 
     assert.equal(shared.calls.length, 0, "with \"Always\", Echo's key isn't used");
   } finally { r.close(); }
 });
+
+test("when Echo's own brain fails for any reason before working, the user's key answers (not only on quota)", async () => {
+  const shared = owner([new GeminiError("other", "model not found"), new GeminiError("auth", "API key not valid")]);
+  const r = await relay(shared);
+  try {
+    const me = r.as(await r.session());
+    await me.post("/cloud/key", { action: "save", key: ARC_GOOD });
+    const first = await me.post("/cloud/chat", { text: "Hello", context: {} });
+    assert.equal(first.status, 200);
+    assert.equal(first.body.reply, "Your ARC key answered.");
+    assert.equal(first.body.keyUsed, "own");
+    const second = await me.post("/cloud/chat", { text: "Again", context: {} });
+    assert.equal(second.body.reply, "Your ARC key answered.", "a refused owner key also hands over");
+    // Without a key of their own, the user still sees Echo's error.
+    shared.generate = async () => { throw new GeminiError("other", "model not found"); };
+    const other = await r.as(await r.session()).post("/cloud/chat", { text: "Hello", context: {} });
+    assert.notEqual(other.status, 200);
+  } finally { r.close(); }
+});
