@@ -1,4 +1,4 @@
-/** Real browser: Settings → Your Gemini key saves a key Google accepts, shows only its last 4, and a used-up day offers "Add my Gemini key". */
+/** Real browser: Settings → Your own key saves a key Google accepts, shows only its last 4, and a used-up day offers "Add my key". */
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
@@ -29,12 +29,12 @@ try {
   await page.waitForFunction(() => document.querySelector('#presence')?.textContent === 'on your phone');
   await page.locator('#chat-input').fill('Hello');
   await page.locator('#chat-input').press('Enter');
-  const add = page.locator('[data-cloud-failure] button', { hasText: 'Add my Gemini key' });
+  const add = page.locator('[data-cloud-failure] button', { hasText: 'Add my key' });
   await add.waitFor();
-  assert.match(await page.locator('[data-cloud-failure]').textContent(), /Add your own free Gemini key in Settings → Your Gemini key/);
+  assert.match(await page.locator('[data-cloud-failure]').textContent(), /Add your own free Gemini key \(or an ARC key\) in Settings → Your own key/);
   // The banner says the same wherever the limit hits, and names the Settings section.
   await page.locator('#limit-banner').waitFor();
-  assert.match(await page.locator('#limit-banner').textContent(), /Echo's free daily limit is used up.*Settings → Your Gemini key/s);
+  assert.match(await page.locator('#limit-banner').textContent(), /Echo's free daily limit is used up.*Settings → Your own key/s);
   if (shots) await page.screenshot({ path: `${shots}/key-chat-limit.png` });
   // "Later" hides it, and a passive status check doesn't bring it back; the next failed request does.
   await page.locator('#limit-close').click();
@@ -78,5 +78,5 @@ try {
   await page.locator('#chat-input').press('Enter');
   await page.waitForFunction(() => [...document.querySelectorAll('.msg.echo')].some((m) => /Answered with your own key/.test(m.textContent)));
   assert.deepEqual(errors, []);
-  console.log('PASS chromium: used-up limit shows a banner naming Settings → Your Gemini key (also on other pages, Later remembered) and offers "Add my Gemini key"; a wrong key is refused, the right one is saved as ••••WXYZ (never in the page) and Chat answers with it.');
+  console.log('PASS chromium: used-up limit shows a banner naming Settings → Your own key (also on other pages, Later remembered) and offers "Add my key"; a wrong key is refused, the right one is saved as ••••WXYZ (never in the page) and Chat answers with it.');
 } finally { await browser.close(); server.closeAllConnections(); server.close(); }

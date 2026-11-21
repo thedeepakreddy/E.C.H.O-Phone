@@ -17,3 +17,6 @@ services:
         sync: false
       - key: ARC_API_KEY
         sync: false
+      # Optional: where users' own ARC keys (Settings → Your own key) are used. Default: ARC_BASE_URL.
+      - key: ARC_USER_URL
+        sync: false

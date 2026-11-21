@@ -29,6 +29,7 @@ import {createMacUpdates} from './lib/mac-updates.js';
  *                              provider keys and picks the model and key; users' own Gemini keys still go to Google
  *   ARC_MODEL                  default "auto" (ARC chooses); or arc/fast, or a provider/model ARC lists
  *   ARC_EMBED_MODEL            default gemini/gemini-embedding-001, so saved memory stays searchable
+ *   ARC_USER_URL               where users' own ARC keys go (Settings → Your own key); default ARC_BASE_URL, else arc-ai.run.place
  *
  * Get started issues a standalone Phone session (lib/secure.js), with no Mac
  * required. Optional Mac sign-in adds a paired pass for the same phone id.
@@ -155,6 +156,9 @@ export function summariseWorld({ conflicts, earthquakes, fires, weather }, now =
   };
 }
 
+/** ARC API key shape (ARC_DEE_<key id>_PAK_<secret>). */
+const ARC_KEY = /^ARC_DEE_[0-9A-Za-z]{17}_PAK_[0-9A-Za-z]{43}$/;
+
 export function createRelay({
   secret, now = () => Date.now(), fetchJson = defaultFetchJson, pollMs = POLL_MS, requestMs = REQUEST_MS,
   gemini = null, store = null, limits = {},
@@ -167,6 +171,10 @@ export function createRelay({
    * when the shared brain goes through ARC, so it never inherits ARC's model name.
    */
   makeGemini = (apiKey) => createGemini({ apiKey, ...(gemini?.model && gemini.via !== "arc" ? { model: gemini.model } : {}) }),
+  /** Where a user's own ARC key is used (their own ARC workspace, their own provider keys). */
+  arcUrl = "https://arc-ai.run.place/v1",
+  /** A brain on a user's own ARC key (tests pass a stand-in). */
+  makeArc = (apiKey) => createArc({ baseUrl: arcUrl, apiKey }),
 } = {}) {
   if (!secret || secret.length < 32) throw new Error("RELAY_SECRET must be set (at least 32 characters).");
   const secretBuf = Buffer.from(secret);
@@ -456,29 +464,34 @@ export function createRelay({
   };
   const cloud = gemini ? createCloud({ gemini, store, now, limits, tools: cloudTools }) : null;
 
-  // ---- A user's own Gemini key ---------------------------------------------------
+  // ---- A user's own key: Gemini, or an ARC key (their own ARC workspace) ---------------
   // Echo answers on the owner's key (GEMINI_API_KEY). A user may add their own
   // free key in Settings, used when the owner's daily limit runs out, or always.
   // The key is sealed in the store with the rest of the account (lib/store.js),
   // never sent back to any phone or written to a log; only its last 4 characters
   // are shown. Its usage is counted apart from the owner's.
   const userKeys = new Map();
+  /** The ARC dashboard where people get an ARC key: sign up, add provider keys, create an app. */
+  const arcDashboard = `${String(arcUrl).replace(/\/+$/, "").replace(/\/v1$/, "")}/dashboard`;
   const keyRecord = (device) => store.get(`ukey:${device}`).catch(() => null);
   /** A brain on this user's key, made once per key and kept for a while. */
   async function ownBrain(device) {
     const rec = await keyRecord(device);
     if (!rec?.key) return null;
     const cached = userKeys.get(device);
-    if (cached?.key === rec.key) return { cloud: cached.cloud, mode: rec.mode };
-    const own = makeGemini(rec.key);
-    if (gemini?.fallbackModels) own.fallbackModels = gemini.fallbackModels;
-    if (gemini && "agentModel" in gemini) own.agentModel = gemini.agentModel;
+    if (cached?.key === rec.key) return { cloud: cached.cloud, mode: rec.mode, provider: rec.provider ?? "gemini" };
+    const own = rec.provider === "arc" ? makeArc(rec.key) : makeGemini(rec.key);
+    // Gemini model names only mean something on Google; ARC picks its own models and fallback.
+    if (rec.provider !== "arc") {
+      if (gemini?.fallbackModels && gemini.via !== "arc") own.fallbackModels = gemini.fallbackModels;
+      if (gemini && "agentModel" in gemini) own.agentModel = gemini.agentModel;
+    }
     const prefix = `uk:${createHash("sha256").update(device).digest("hex").slice(0, 16)}:`;
     const counted = { count: (k) => store.count(prefix + k), incr: (k, t) => store.incr(prefix + k, t), setCount: (k, n, t) => store.setCount(prefix + k, n, t) };
     const entry = { key: rec.key, cloud: createCloud({ gemini: own, store: counted, now, limits: { messages: 1000, snaps: 200, browseSteps: 1500 }, tools: cloudTools }) };
     userKeys.delete(device); userKeys.set(device, entry);
     if (userKeys.size > 100) userKeys.delete(userKeys.keys().next().value);
-    return { cloud: entry.cloud, mode: rec.mode };
+    return { cloud: entry.cloud, mode: rec.mode, provider: rec.provider ?? "gemini" };
   }
   /** Whether this account can get an answer at all: the owner's key, or its own. */
   const brainReady = async (device) => Boolean(cloud) || Boolean(await keyRecord(device));
@@ -496,8 +509,9 @@ export function createRelay({
       try { const r = await fn(own.cloud); if (r && typeof r === "object") r.keyUsed = "own"; return r; }
       catch (e) {
         // The user's key, in words about the user's key.
-        if (e instanceof CloudError && e.kind === "setup") e.message = "Your Gemini key isn't working any more. Check or replace it in Settings.";
-        if (e instanceof CloudError && e.kind === "quota") e.message = "Your own Gemini key has used today's free limit too.";
+        const which = own.provider === "arc" ? "ARC" : "Gemini";
+        if (e instanceof CloudError && e.kind === "setup") e.message = `Your ${which} key isn't working any more. Check or replace it in Settings.`;
+        if (e instanceof CloudError && e.kind === "quota") e.message = own.provider === "arc" ? "Your ARC key has no free capacity left right now. Add more provider keys in your ARC dashboard." : "Your own Gemini key has used today's free limit too.";
         throw e;
       }
     };
@@ -507,7 +521,7 @@ export function createRelay({
     catch (e) {
       if (!outOfShared(e)) throw e;
       if (e.kind === "quota") sharedOutUntil = e.resetsAt ?? 0;
-      if (!own) { e.message = `${e.message} Add your own free Gemini key in Settings → Your Gemini key to keep going.`; e.ownKeyHelps = true; throw e; }
+      if (!own) { e.message = `${e.message} Add your own free Gemini key (or an ARC key) in Settings → Your own key to keep going.`; e.ownKeyHelps = true; throw e; }
       return mine();
     }
   }
@@ -821,7 +835,7 @@ export function createRelay({
       return send(res, 200, {
         ready: Boolean(cloud) || Boolean(own), model: gemini?.model ?? null, store: store.remote ? "upstash" : "memory",
         macOnline, usage: cloud ? await cloud.usage().catch(() => null) : null, passExpires: claims.exp,
-        ownKey: own ? { last4: own.last4, mode: own.mode } : null, sharedOut: now() < sharedOutUntil, sharedBackAt: now() < sharedOutUntil ? sharedOutUntil : null, sharedKey: Boolean(cloud),
+        ownKey: own ? { last4: own.last4, mode: own.mode, provider: own.provider ?? "gemini" } : null, sharedOut: now() < sharedOutUntil, sharedBackAt: now() < sharedOutUntil ? sharedOutUntil : null, sharedKey: Boolean(cloud),
         // Agents may reason on a stronger model than chat.
         agentModel: cloud ? cloud.agentModel() : null,
       });
@@ -829,7 +843,7 @@ export function createRelay({
     const device = claims.device;
     // ---- Your own Gemini key (Settings) ----
     if (path === "/cloud/key") {
-      if (req.method === "GET") { const own = await keyRecord(device); return send(res, 200, { ownKey: own ? { last4: own.last4, mode: own.mode, savedAt: own.savedAt } : null, sharedKey: Boolean(cloud), sharedOut: now() < sharedOutUntil }); }
+      if (req.method === "GET") { const own = await keyRecord(device); return send(res, 200, { ownKey: own ? { last4: own.last4, mode: own.mode, savedAt: own.savedAt, provider: own.provider ?? "gemini" } : null, sharedKey: Boolean(cloud), sharedOut: now() < sharedOutUntil, arcUrl: arcDashboard }); }
       if (req.method !== "POST") return send(res, 405, { message: "Method not allowed." });
       if (hitLimit(`key:${device}`, 6)) return send(res, 429, { error: "busy", message: "Too many key changes this minute. Try again shortly." });
       try {
@@ -840,21 +854,29 @@ export function createRelay({
           const own = await keyRecord(device);
           if (!own) return send(res, 400, { error: "input", message: "Add a key first." });
           await store.set(`ukey:${device}`, { ...own, mode });
-          return send(res, 200, { ownKey: { last4: own.last4, mode } });
+          return send(res, 200, { ownKey: { last4: own.last4, mode, provider: own.provider ?? "gemini" } });
         }
         if (b.action !== "save") return send(res, 400, { error: "input", message: "Choose save, mode or remove." });
         const key = String(b.key ?? "").trim();
-        if (!/^[A-Za-z0-9._-]{20,200}$/.test(key)) return send(res, 400, { error: "input", message: "That doesn't look like a Gemini API key. Copy it from aistudio.google.com/apikey." });
-        // Checked with Google before it is kept: a key that can't list models can't answer either.
-        try { const models = await makeGemini(key).listModels(); if (!models.length) throw new GeminiError("other", "No models"); }
+        // ARC keys have a fixed shape (ARC_DEE_<id>_PAK_<secret>); anything else is treated as a Gemini key.
+        const provider = /^ARC_/.test(key) ? "arc" : "gemini";
+        if (provider === "arc" && !ARC_KEY.test(key)) return send(res, 400, { error: "input", message: `That doesn't look like a whole ARC key. Copy it again from your app's page in ARC (${arcDashboard}).` });
+        if (provider === "gemini" && !/^[A-Za-z0-9._-]{20,200}$/.test(key)) return send(res, 400, { error: "input", message: "That doesn't look like a Gemini API key. Copy it from aistudio.google.com/apikey." });
+        // Checked before it is kept: a key that can't list models can't answer either.
+        try { const models = await (provider === "arc" ? makeArc(key) : makeGemini(key)).listModels(); if (!models.length) throw new GeminiError("other", "No models"); }
         catch (e) {
           const kind = e instanceof GeminiError ? e.kind : "server";
-          return send(res, 400, { error: "input", message: kind === "auth" ? "Google didn't accept that key. Check you copied all of it from aistudio.google.com/apikey." : kind === "day" || kind === "minute" ? "That key works but is out of quota right now. Try again later." : "Couldn't check that key with Google just now. Try again." });
+          const message = provider === "arc"
+            ? kind === "auth" ? `ARC didn't accept that key. Check you copied all of it from your app's page in ARC (${arcDashboard}).`
+              : e?.message === "No models" ? "ARC accepted the key, but it has no models yet. Add a provider key in your ARC dashboard first."
+              : "Couldn't check that key with ARC just now. Try again."
+            : kind === "auth" ? "Google didn't accept that key. Check you copied all of it from aistudio.google.com/apikey." : kind === "day" || kind === "minute" ? "That key works but is out of quota right now. Try again later." : "Couldn't check that key with Google just now. Try again.";
+          return send(res, 400, { error: "input", message });
         }
-        const rec = { key, last4: key.slice(-4), mode, savedAt: now() };
+        const rec = { key, provider, last4: key.slice(-4), mode, savedAt: now() };
         await store.set(`ukey:${device}`, rec);
         userKeys.delete(device);
-        return send(res, 200, { ownKey: { last4: rec.last4, mode, savedAt: rec.savedAt } });
+        return send(res, 200, { ownKey: { last4: rec.last4, mode, savedAt: rec.savedAt, provider } });
       } catch (e) { return sendCloudError(res, e); }
     }
     if(req.method === "GET" && path === "/cloud/bots") {
@@ -1629,6 +1651,8 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     secret: relaySecret, store, gemini, publicUrl: env.RENDER_EXTERNAL_URL || "https://echo-phone.onrender.com",
     limits: { messages: Number(env.PHONE_DAILY_MESSAGES) || 200, snaps: Number(env.PHONE_DAILY_SNAPS) || 30, browseSteps: Number(env.PHONE_DAILY_BROWSE) || 300 },
     adminPassword: env.ECHO_ADMIN_PASSWORD || "", deployment: { commit: env.RENDER_GIT_COMMIT, scheduler: Boolean(env.QSTASH_TOKEN) },
+    // Users' own ARC keys go to this ARC (default: the owner's ARC_BASE_URL, else arc-ai.run.place).
+    ...(env.ARC_USER_URL?.trim() || env.ARC_BASE_URL?.trim() ? { arcUrl: (env.ARC_USER_URL || env.ARC_BASE_URL).trim() } : {}),
   });
   console.log(`Phone mode: brain ${gemini ? (gemini.via === "arc" ? `ARC (${gemini.model}, embeddings ${gemini.embedModel})` : gemini.model) : "off (no GEMINI_API_KEY or ARC_API_KEY)"}, store ${store.remote ? "Upstash" : "memory only (no UPSTASH_REDIS_REST_URL/TOKEN)"}`);
   // Browsing uses a stronger model with its own free quota: GEMINI_BROWSE_MODEL, or the best Flash model this key has.
