@@ -499,6 +499,11 @@ export function createRelay({
   let sharedOutUntil = 0;
   const outOfShared = (e) => e instanceof CloudError && ["quota", "cap"].includes(e.kind) && e.fresh !== false;
   /**
+   * Echo's own brain couldn't answer (broken or refused key, unavailable, no answer) before any
+   * work started: a user's own key may take this request. Their input being wrong doesn't count.
+   */
+  const sharedFailed = (e) => e instanceof CloudError && ["setup", "unavailable", "failed", "minute", "busy"].includes(e.kind) && e.fresh !== false;
+  /**
    * Run fn(brain) on the right key: the user's own when they chose "always" or
    * when the owner's is used up; otherwise the owner's, moving to the user's
    * key if the owner's runs out before any work started. result.keyUsed says which.
@@ -519,6 +524,8 @@ export function createRelay({
     if (!cloud) throw new CloudError("setup", "Phone mode isn't set up yet: add GEMINI_API_KEY on Render, or your own Gemini key in Settings.");
     try { const r = await fn(cloud); if (r && typeof r === "object") r.keyUsed = "shared"; return r; }
     catch (e) {
+      // Not about quota: the user's own key answers this request, if they have one.
+      if (own && sharedFailed(e)) return mine();
       if (!outOfShared(e)) throw e;
       if (e.kind === "quota") sharedOutUntil = e.resetsAt ?? 0;
       if (!own) { e.message = `${e.message} Add your own free Gemini key (or an ARC key) in Settings → Your own key to keep going.`; e.ownKeyHelps = true; throw e; }
