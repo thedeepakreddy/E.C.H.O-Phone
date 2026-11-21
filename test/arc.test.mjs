@@ -183,3 +183,21 @@ test("a phone chat turn goes through a running ARC end to end", async () => {
     fakeArc.closeAllConnections(); fakeArc.close();
   }
 });
+
+test("through ARC, Google's remembered daily limit doesn't stop Echo; with Gemini directly it still does", async () => {
+  const { quotaDay } = await import("../lib/cloud.js");
+  const answer = { candidates: [{ content: { role: "model", parts: [{ text: "Hi there" }] } }] };
+  for (const via of ["arc", undefined]) {
+    const store = createStore({ key: Buffer.alloc(32) });
+    // A limit learned from Google on an earlier day, and today's requests already past it.
+    await store.setCount("qlimit", 20);
+    await store.setCount(`q:${quotaDay(Date.now())}`, 25, 86400);
+    const cloud = createCloud({ store, tools: {}, gemini: { via, model: "auto", generate: async () => answer } });
+    if (via === "arc") {
+      const out = await cloud.chat({ history: [], text: "Hello" });
+      assert.match(out.reply, /Hi there/);
+    } else {
+      await assert.rejects(cloud.chat({ history: [], text: "Hello" }), /free Gemini limit/);
+    }
+  }
+});
